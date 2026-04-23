@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: lint + typecheck + stdout-gate + build + test
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["18", "20", "22"]
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Stdout-gate (static grep)
+        shell: bash
+        run: npm run stdout-gate
+
+      - name: Build
+        run: npm run build
+
+      - name: Verify bin shebang
+        shell: bash
+        run: |
+          first_line=$(head -n 1 dist/index.js)
+          if [ "$first_line" != "#!/usr/bin/env node" ]; then
+            echo "Expected '#!/usr/bin/env node' on line 1 of dist/index.js, got: $first_line"
+            exit 1
+          fi
+
+      - name: Test
+        run: npm test

@@ -1,0 +1,165 @@
+name: publish
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Guarded npm publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Enforce master-branch only
+        run: |
+          if [ "${{ github.ref }}" != "refs/heads/master" ]; then
+            echo "Publish only allowed from master. Refusing to publish from ${{ github.ref }}."
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+          cache: npm
+
+      - name: Install dependencies (npm ci)
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Stdout-gate
+        shell: bash
+        run: npm run stdout-gate
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm test
+
+      - name: Read package version
+        id: version
+        shell: bash
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Publishing version: $VERSION"
+
+      - name: Refuse re-publish of existing version
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          # Distinguish "version absent" from transient network/DNS failure.
+          # Query the full version list; only if the fetch succeeds AND the
+          # target version appears in it do we refuse the publish. A network
+          # failure falls through with a warning so the operator retries
+          # instead of being misled into a double-publish attempt.
+          set +e
+          EXISTING=$(npm view "@snapper/mcp-client" versions --json 2>/tmp/npm_view.err)
+          STATUS=$?
+          set -e
+          if [ "$STATUS" -ne 0 ]; then
+            if grep -qi "code E404" /tmp/npm_view.err; then
+              echo "npm view returned 404 — first-ever publish of @snapper/mcp-client. Proceeding."
+            else
+              echo "npm view failed with a non-404 error. Refusing to publish to avoid accidental double-publish."
+              cat /tmp/npm_view.err
+              exit 1
+            fi
+          else
+            if echo "$EXISTING" | grep -q "\"${VERSION}\""; then
+              echo "Version ${VERSION} already exists on npm; bump package.json first."
+              exit 1
+            fi
+            echo "Version ${VERSION} not yet on npm — proceeding."
+          fi
+
+      - name: npm pack dry-run (file-list audit)
+        run: npm pack --dry-run
+
+      - name: Publish to npm (public, with provenance)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --provenance
+
+      - name: Post-publish verification
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          sleep 10
+          npm view "@snapper/mcp-client@${VERSION}" version
+
+      - name: Extract CHANGELOG entry for this version
+        id: changelog
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          # Extract the CHANGELOG.md section for the version just published.
+          # Convention: each release is an H2 heading "## [X.Y.Z]" followed by
+          # content until the next H2. Falls back to a minimal auto-generated
+          # note if no matching section is found.
+          if grep -q "^## \[${VERSION}\]" CHANGELOG.md; then
+            awk -v ver="${VERSION}" '
+              $0 ~ "^## \\[" ver "\\]" { found=1; next }
+              found && /^## \[/ { exit }
+              found { print }
+            ' CHANGELOG.md > /tmp/release_body.md
+          else
+            echo "No CHANGELOG.md entry for version ${VERSION}; using placeholder." >&2
+            printf "Release %s\n\nSee the CHANGELOG for details.\n" "${VERSION}" > /tmp/release_body.md
+          fi
+          {
+            echo "body_file=/tmp/release_body.md"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create git tag v${{ steps.version.outputs.version }}
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Refuse if the tag already exists — a re-run after publish failure
+          # should be explicit, not silently clobber.
+          if git rev-parse "v${VERSION}" >/dev/null 2>&1; then
+            echo "Tag v${VERSION} already exists locally — aborting to avoid overwrite."
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "v${VERSION}" >/dev/null 2>&1; then
+            echo "Tag v${VERSION} already exists on origin — aborting to avoid overwrite."
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${VERSION}" -m "Release v${VERSION}"
+          git push origin "v${VERSION}"
+
+      - name: Create GitHub Release
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BODY_FILE: ${{ steps.changelog.outputs.body_file }}
+        run: |
+          gh release create "v${VERSION}" \
+            --title "v${VERSION}" \
+            --notes-file "${BODY_FILE}" \
+            --verify-tag

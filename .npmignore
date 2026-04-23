@@ -1,0 +1,16 @@
+src/
+test/
+.github/
+.husky/
+eslint.config.js
+tsup.config.ts
+tsconfig.json
+package-lock.json
+.gitleaks.toml
+.gitattributes
+.env.example
+.editorconfig
+.prettierrc
+.prettierrc.json
+*.log
+.env
