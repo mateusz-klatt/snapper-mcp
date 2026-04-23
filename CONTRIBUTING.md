@@ -1,4 +1,4 @@
-# Contributing to @snapper/mcp-client
+# Contributing to snapper-mcp
 
 Thanks for your interest. This package is a public-facing bridge — quality bar is high.
 
@@ -18,7 +18,7 @@ npm run stdout-gate
 npm test
 ```
 
-Minimum Node version is `>=18.0.0 <23.0.0` (matches Claude Desktop's embedded Node + Claude Code's `engines` window).
+Minimum Node version is `>=22.0.0` (matches Claude Desktop's embedded Node and vitest 4's `node:util` usage).
 
 ## Integration test against a local Snapper instance
 
@@ -68,8 +68,9 @@ disconnects.
 - Every log line goes to **stderr** via `process.stderr.write` or
   `console.error`.
 - `eslint`'s `no-console` rule allows only `console.error` and `console.warn`.
-- The `stdout-gate` npm script greps source for forbidden patterns; CI enforces
-  it.
+- The `stdout-gate` npm script (a small cross-platform Node scanner
+  under `scripts/stdout-gate.mjs`) walks `src/` for forbidden patterns;
+  CI enforces it.
 - A runtime stdout-hijack test in CI asserts every stdout line from the
   subprocess parses as JSON-RPC.
 

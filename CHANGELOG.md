@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to `@snapper/mcp-client` are documented here.
+All notable changes to `snapper-mcp` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
@@ -11,96 +11,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - (next release TBD)
 
-## [1.0.0]
+## [0.1.0]
 
-First stable release of the bridge. The prior `0.1.0-alpha.0`
-publish was a scope-reservation placeholder with no functional code.
+First public release. Everything below ships in this version.
 
-### Highlights
+### Runtime
 
-- Production-grade stdio↔HTTP MCP bridge for Claude Desktop /
-  Claude Code ↔ Snapper `/api/mcp`. Bearer-JWT auth with on-401
-  single-flight refresh-rotation + SDK-delegated cancellation +
-  SIGTERM-driven graceful drain + stdout byte-purity guarantees.
-- Five refresh-path stderr mappings (rejected / malformed / 5xx /
-  network / timeout). Backend transport errors (feature_disabled,
-  user_deactivated, invalid_bearer_token, missing_bearer_token,
-  mcp_unavailable, rate_limit_exceeded) surface through the MCP
-  SDK's own `McpError` / JSON-RPC error envelopes to the host;
-  documented in README troubleshooting table.
-- Zero telemetry / cached credentials / runtime dependencies
+- Lightweight stdio-to-HTTP MCP bridge. Spawns as a subprocess, speaks
+  MCP over stdio to Claude Desktop / Claude Code, and proxies every
+  request to a Snapper backend's `/api/mcp` endpoint with Bearer-JWT
+  auth and on-401 single-flight refresh-token rotation.
+- Strict env-var config: `SNAPPER_BASE_URL`, `SNAPPER_ACCESS_TOKEN`,
+  `SNAPPER_REFRESH_TOKEN`. Trailing slashes on the base URL are
+  normalised so either `/api/mcp` or `/api/mcp/` is accepted.
+- Stderr-only logger (`SNAPPER_MCP_LOG_LEVEL` debug/info/warn/error).
+  Stdout is reserved for JSON-RPC frames; a runtime byte-purity test
+  enforces this at build-output level.
+- `TokenStore` with race-tight single-flight rotation — N concurrent
+  401s trigger exactly one refresh call; every caller awaits the same
+  promise and observes the rotated pair atomically.
+- Custom `fetch` wrapper preserves SDK-set `Accept` / `Content-Type`
+  headers while injecting `Authorization`; peeks `error_code` on a
+  cloned response; retries once after refresh (`retry-bound = 1`,
+  no refresh storms).
+- Bidirectional MCP proxy with exact capability-mirror subset
+  filtering — only forwards what the backend advertises and the
+  bridge knows how to proxy. `fallbackNotificationHandler` for
+  reverse path; three-kind capability gate (always / family / sub)
+  drives which stdio handlers register.
+- App-owned SIGTERM/SIGINT drain. Tracks `pendingForward` +
+  `pendingReverse` Sets, `Promise.allSettled` under a 10 s budget
+  split across forward and reverse, `isShuttingDown` flag gates
+  new request handlers, exit code reflects either-set timeout.
+- Zero telemetry, zero cached credentials, zero runtime dependencies
   beyond `@modelcontextprotocol/sdk`.
-- CI matrix Node 18/20/22 × ubuntu/macos/windows, SonarCloud static
-  analysis, gitleaks secret-scan, provenance-attested
-  workflow_dispatch publish pipeline.
 
-Full set of deliverables (carried over from [0.2.0] below — same
-codebase, only the version metadata changed for the 1.0.0 release).
+### Quality + release tooling
 
-## [0.2.0]
-
-### Added
-
-- Functional stdio↔HTTP MCP bridge — `node dist/index.js` with
-  `SNAPPER_BASE_URL` + `SNAPPER_ACCESS_TOKEN` + `SNAPPER_REFRESH_TOKEN`
-  env vars boots a live bridge against Snapper's `/api/mcp` endpoint.
-- `TokenStore` with race-tight single-flight refresh rotation.
-- `createBridgeFetch` custom `fetch` wrapper (SDK v1.29 `FetchLike`
-  option) — preserves SDK-set headers via `new Headers(init.headers)`
-  then `.set("Authorization", ...)`; `peekErrorCode` reads
-  `response.clone()`; `invalid_bearer_token`-gated refresh with
-  retry-bound of 1.
-- `makePerformRefresh` with 10s `AbortController` timeout, POST to
-  `/api/auth/refresh?return_tokens=true` with `Authorization: Bearer
-  <refresh_jwt>`, PayloadResponse envelope parsing (rejects flat body
-  shapes).
-- Bidirectional MCP proxy with capability-mirror subset filtering
-  (exactly matches what the bridge can proxy), `fallbackNotificationHandler`
-  for reverse-path forwarding, SDK-delegated cancellation propagation
-  via `extra.signal` → `httpClient.request({ signal })`, and sub-
-  capability gating for `resources/subscribe` / `unsubscribe`.
-- App-owned SIGTERM/SIGINT drain — `pendingForward` + `pendingReverse`
-  Sets tracked in user space, `Promise.allSettled` drain under a 10s
-  timeout, `isShuttingDown` flag guards new request handlers, exit
-  code reflects either-set timeout.
-- End-to-end subprocess tests against a local mock MCP backend
-  (initialize, tools/list, resources/list refused when capability
-  absent, SIGTERM drain, env-failure paths per required var).
-- Runtime stdout byte-purity test via
-  `readline.createInterface({ crlfDelay: Infinity })` — portable on
-  windows-latest CI.
-- SonarCloud analysis wired via `workflow_dispatch` +
-  `push/pull_request` with lcov coverage from vitest's v8 provider.
-- Provenance-attested `npm publish --access public` workflow
-  (`workflow_dispatch` only, with `permissions: id-token: write` for
-  OIDC).
-
-### Changed
-
-- Build-time version injection via `tsup.config.ts` `define` →
-  single source of truth is `package.json`; the runtime banner
-  cannot drift from the published metadata.
-- Full `README.md` covering install + Claude Desktop + Claude Code
-  integration + token generation + auth/refresh semantics + error
-  handling + shutdown drain + privacy statement + troubleshooting
-  tables (startup / refresh-path / backend-transport).
-- `src/errors.ts` defines `REFRESH_ERROR_MAPPINGS` +
-  `resolveRefreshError` consumed by `createBridgeFetch` in
-  `bridge_fetch.ts` to emit actionable stderr on refresh failures.
-  Backend transport errors are NOT re-mapped at runtime; they
-  surface through the SDK's `McpError` / JSON-RPC envelope (README
-  troubleshooting documents the user-facing meaning of each
-  backend `error_code`).
-
-## [0.1.0-alpha.0]
-
-### Added
-
-- Initial package skeleton: toolchain (`tsup`, `vitest`, `eslint`), CI workflows (lint + typecheck + build + test across Node 18/20/22 × ubuntu/macos/windows matrix), `gitleaks` secret-scan workflow, and a `workflow_dispatch` publish workflow.
-- `LICENSE` (MIT), `.gitignore`, `.gitattributes` (LF), `.gitleaks.toml` allowlist for placeholders + test fixtures.
-- Placeholder `src/main.ts` — logs a stub banner to stderr and exits 0. Real bridge wiring lands in v0.2.0.
-- Documentation placeholders: `README.md`, `CONTRIBUTING.md`, `CODEOWNERS`, `.github/pull_request_template.md`.
-
-### Reserved
-
-- npm scope `@snapper/mcp-client` — published as `0.1.0-alpha.0` to claim the package name.
+- 132 unit + integration tests (vitest). Subprocess tests against a
+  mock Snapper HTTP server cover `initialize`, `tools/list`,
+  capability-missing refusal, SIGTERM drain, and env-failure exit
+  paths.
+- 100% line coverage + 100% function coverage; statements ≥99%,
+  branches ≥90% enforced by `vitest.config.ts` thresholds.
+- CI matrix: Node 22 × ubuntu/macos/windows (minimum validated,
+  higher versions work through stable Node APIs).
+- Static gates: ESLint (no-console, no-any), TypeScript strict,
+  stdout-gate scanner, gitleaks secret scan, SonarCloud quality scan.
+- Release guardrails (`.github/workflows/publish.yml`): manual
+  `workflow_dispatch` from `master` only, full gate re-run,
+  `npm pack --dry-run` audit, version-already-published check
+  (distinguishes npm 404 from network error), `npm publish
+  --provenance`, post-publish verify, auto-create `v{version}` git
+  tag + GitHub Release whose body is extracted from this CHANGELOG.
+- Dependabot weekly updates for npm + github-actions with grouped
+  `@types/*`, `vitest`, and `eslint` bumps.
