@@ -60,13 +60,13 @@
     "@types/node": "^25",
     "@typescript-eslint/eslint-plugin": "^8",
     "@typescript-eslint/parser": "^8",
-    "@vitest/coverage-v8": "^1.6.1",
+    "@vitest/coverage-v8": "^4.1.5",
     "eslint": "^9",
     "globals": "^17.5.0",
     "simple-git-hooks": "^2.11",
     "tsup": "^8",
     "typescript": "^5.4",
-    "vitest": "^1.6"
+    "vitest": "^4.1"
   },
   "simple-git-hooks": {
     "pre-commit": "npx gitleaks protect --staged -v --config=.gitleaks.toml"
