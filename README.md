@@ -1,8 +1,8 @@
-# @snapper/mcp-client
+# snapper-mcp
 
-[![npm version](https://img.shields.io/npm/v/@snapper/mcp-client.svg)](https://www.npmjs.com/package/@snapper/mcp-client)
-[![node](https://img.shields.io/node/v/@snapper/mcp-client.svg)](https://nodejs.org/)
-[![license](https://img.shields.io/npm/l/@snapper/mcp-client.svg)](./LICENSE)
+[![npm version](https://img.shields.io/npm/v/snapper-mcp.svg)](https://www.npmjs.com/package/snapper-mcp)
+[![node](https://img.shields.io/node/v/snapper-mcp.svg)](https://nodejs.org/)
+[![license](https://img.shields.io/npm/l/snapper-mcp.svg)](./LICENSE)
 [![CI](https://github.com/mateusz-klatt/snapper-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/mateusz-klatt/snapper-mcp/actions/workflows/ci.yml)
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=mateusz-klatt_snapper-mcp&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=mateusz-klatt_snapper-mcp)
 
@@ -17,12 +17,11 @@ Snapper is a multi-tenant trading platform. Its backend exposes MCP at
 `/api/mcp`, guarded by Bearer-JWT auth, feature flag, and per-principal
 rate limiting. MCP hosts (Claude Desktop, Claude Code) speak MCP over
 **stdio** — they spawn a subprocess and exchange JSON-RPC frames over
-stdin/stdout. `@snapper/mcp-client` is the stdio ⇄ HTTP bridge that
+stdin/stdout. `snapper-mcp` is the stdio ⇄ HTTP bridge that
 makes that conversation work.
 
-It is a **thin** bridge: ~1200 lines of TypeScript, single `fetch`
-dependency on Node 18's built-in, plus `@modelcontextprotocol/sdk` for
-MCP framing. No OAuth, no telemetry, no cached credentials on disk —
+It is a **thin** bridge: ~1200 lines of TypeScript, using Node's
+built-in `fetch`, plus `@modelcontextprotocol/sdk` for MCP framing. No OAuth, no telemetry, no cached credentials on disk —
 tokens come from env vars, get rotated in-memory, and die with the
 process.
 
@@ -30,15 +29,17 @@ process.
 
 ```bash
 # One-shot via npx (recommended — matches what Claude Desktop + Claude Code do):
-npx -y @snapper/mcp-client
+npx -y snapper-mcp
 
 # Or install globally:
-npm install -g @snapper/mcp-client
-snapper-mcp-client
+npm install -g snapper-mcp
+snapper-mcp
 ```
 
-Requires **Node 18+** (uses Node's built-in `fetch`, `AbortController`,
-and ESM top-level `await`). Tested on Ubuntu / macOS / Windows in CI.
+Requires **Node 22+** (uses Node's built-in `fetch`, `AbortController`,
+and ESM top-level `await`). CI validates the declared minimum
+(Node 22) across Ubuntu / macOS / Windows; higher Node versions
+work because the bridge only relies on APIs stable since Node 18.
 
 Three required env vars must be set by the MCP host before spawning:
 
@@ -59,7 +60,7 @@ Add to your Claude Desktop config (e.g. `~/Library/Application Support/Claude/cl
   "mcpServers": {
     "snapper": {
       "command": "npx",
-      "args": ["-y", "@snapper/mcp-client"],
+      "args": ["-y", "snapper-mcp"],
       "env": {
         "SNAPPER_BASE_URL": "https://your-snapper-instance.example.com/api/mcp",
         "SNAPPER_ACCESS_TOKEN": "<generated via Snapper UI: Settings → AI Delegates>",

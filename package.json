@@ -1,6 +1,6 @@
 {
-  "name": "@snapper/mcp-client",
-  "version": "1.0.0",
+  "name": "snapper-mcp",
+  "version": "0.1.0",
   "description": "Lightweight stdio-to-HTTP MCP bridge from Claude Desktop / Claude Code to Snapper /api/mcp.",
   "type": "module",
   "main": "./dist/index.js",
@@ -13,7 +13,7 @@
     }
   },
   "bin": {
-    "snapper-mcp-client": "dist/index.js"
+    "snapper-mcp": "dist/index.js"
   },
   "files": [
     "dist",
@@ -22,7 +22,7 @@
     "CHANGELOG.md"
   ],
   "engines": {
-    "node": ">=18.0.0 <23.0.0"
+    "node": ">=22.0.0"
   },
   "license": "MIT",
   "repository": {
@@ -46,10 +46,11 @@
   ],
   "scripts": {
     "build": "tsup",
+    "pretest": "tsup",
     "test": "vitest run",
     "lint": "eslint src test",
     "typecheck": "tsc --noEmit",
-    "stdout-gate": "! grep -rE 'console\\.(log|info|debug|dir|trace|group)|process\\.stdout' src/",
+    "stdout-gate": "node scripts/stdout-gate.mjs src",
     "prepare": "simple-git-hooks || true",
     "dev": "tsup --watch"
   },
@@ -57,6 +58,7 @@
     "@modelcontextprotocol/sdk": "^1.29.0"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "^25",
     "@typescript-eslint/eslint-plugin": "^8",
     "@typescript-eslint/parser": "^8",
