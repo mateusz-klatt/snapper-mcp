@@ -45,7 +45,7 @@ declare const __PKG_VERSION__: string | undefined;
 declare const __PKG_NAME__: string | undefined;
 
 const VERSION = typeof __PKG_VERSION__ === "string" ? __PKG_VERSION__ : "dev";
-const CLIENT_NAME = typeof __PKG_NAME__ === "string" ? __PKG_NAME__ : "snapper-mcp";
+const CLIENT_NAME = typeof __PKG_NAME__ === "string" ? __PKG_NAME__ : "@mateusz-klatt/snapper-mcp";
 
 export interface MainOptions {
   readonly source?: NodeJS.ProcessEnv;

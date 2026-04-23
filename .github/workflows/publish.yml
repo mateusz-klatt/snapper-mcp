@@ -72,12 +72,12 @@ jobs:
           # failure falls through with a warning so the operator retries
           # instead of being misled into a double-publish attempt.
           set +e
-          EXISTING=$(npm view "snapper-mcp" versions --json 2>/tmp/npm_view.err)
+          EXISTING=$(npm view "@mateusz-klatt/snapper-mcp" versions --json 2>/tmp/npm_view.err)
           STATUS=$?
           set -e
           if [ "$STATUS" -ne 0 ]; then
             if grep -qi "code E404" /tmp/npm_view.err; then
-              echo "npm view returned 404 — first-ever publish of snapper-mcp. Proceeding."
+              echo "npm view returned 404 — first-ever publish of @mateusz-klatt/snapper-mcp. Proceeding."
             else
               echo "npm view failed with a non-404 error. Refusing to publish to avoid accidental double-publish."
               cat /tmp/npm_view.err
@@ -105,7 +105,7 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           sleep 10
-          npm view "snapper-mcp@${VERSION}" version
+          npm view "@mateusz-klatt/snapper-mcp@${VERSION}" version
 
       - name: Extract CHANGELOG entry for this version
         id: changelog

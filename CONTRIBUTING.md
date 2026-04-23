@@ -1,4 +1,4 @@
-# Contributing to snapper-mcp
+# Contributing to @mateusz-klatt/snapper-mcp
 
 Thanks for your interest. This package is a public-facing bridge — quality bar is high.
 
