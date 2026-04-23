@@ -1,8 +1,8 @@
-# snapper-mcp
+# @mateusz-klatt/snapper-mcp
 
-[![npm version](https://img.shields.io/npm/v/snapper-mcp.svg)](https://www.npmjs.com/package/snapper-mcp)
-[![node](https://img.shields.io/node/v/snapper-mcp.svg)](https://nodejs.org/)
-[![license](https://img.shields.io/npm/l/snapper-mcp.svg)](./LICENSE)
+[![npm version](https://img.shields.io/npm/v/@mateusz-klatt/snapper-mcp.svg)](https://www.npmjs.com/package/@mateusz-klatt/snapper-mcp)
+[![node](https://img.shields.io/node/v/@mateusz-klatt/snapper-mcp.svg)](https://nodejs.org/)
+[![license](https://img.shields.io/npm/l/@mateusz-klatt/snapper-mcp.svg)](./LICENSE)
 [![CI](https://github.com/mateusz-klatt/snapper-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/mateusz-klatt/snapper-mcp/actions/workflows/ci.yml)
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=mateusz-klatt_snapper-mcp&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=mateusz-klatt_snapper-mcp)
 
@@ -17,7 +17,7 @@ Snapper is a multi-tenant trading platform. Its backend exposes MCP at
 `/api/mcp`, guarded by Bearer-JWT auth, feature flag, and per-principal
 rate limiting. MCP hosts (Claude Desktop, Claude Code) speak MCP over
 **stdio** — they spawn a subprocess and exchange JSON-RPC frames over
-stdin/stdout. `snapper-mcp` is the stdio ⇄ HTTP bridge that
+stdin/stdout. `@mateusz-klatt/snapper-mcp` is the stdio ⇄ HTTP bridge that
 makes that conversation work.
 
 It is a **thin** bridge: ~1200 lines of TypeScript, using Node's
@@ -29,10 +29,10 @@ process.
 
 ```bash
 # One-shot via npx (recommended — matches what Claude Desktop + Claude Code do):
-npx -y snapper-mcp
+npx -y @mateusz-klatt/snapper-mcp
 
 # Or install globally:
-npm install -g snapper-mcp
+npm install -g @mateusz-klatt/snapper-mcp
 snapper-mcp
 ```
 
@@ -60,7 +60,7 @@ Add to your Claude Desktop config (e.g. `~/Library/Application Support/Claude/cl
   "mcpServers": {
     "snapper": {
       "command": "npx",
-      "args": ["-y", "snapper-mcp"],
+      "args": ["-y", "@mateusz-klatt/snapper-mcp"],
       "env": {
         "SNAPPER_BASE_URL": "https://your-snapper-instance.example.com/api/mcp",
         "SNAPPER_ACCESS_TOKEN": "<generated via Snapper UI: Settings → AI Delegates>",

@@ -1,5 +1,5 @@
 {
-  "name": "snapper-mcp",
+  "name": "@mateusz-klatt/snapper-mcp",
   "version": "0.1.0",
   "description": "Lightweight stdio-to-HTTP MCP bridge from Claude Desktop / Claude Code to Snapper /api/mcp.",
   "type": "module",
