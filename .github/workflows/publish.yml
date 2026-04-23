@@ -104,8 +104,21 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          sleep 10
-          npm view "@mateusz-klatt/snapper-mcp@${VERSION}" version
+          # npm registry CDN replication can take up to a few minutes
+          # after a successful publish before the package becomes visible
+          # on the standard registry endpoint. Retry up to 12 times (2
+          # min total) with 10s backoff before failing the step.
+          for attempt in $(seq 1 12); do
+            if npm view "@mateusz-klatt/snapper-mcp@${VERSION}" version >/dev/null 2>&1; then
+              echo "Package visible on npm registry after ${attempt} attempt(s)."
+              exit 0
+            fi
+            echo "Attempt ${attempt}: registry not yet serving ${VERSION}; sleeping 10s..."
+            sleep 10
+          done
+          echo "Timed out waiting for registry propagation after 2 minutes."
+          echo "This does NOT mean the publish failed — check https://www.npmjs.com/package/@mateusz-klatt/snapper-mcp"
+          exit 1
 
       - name: Extract CHANGELOG entry for this version
         id: changelog
