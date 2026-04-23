@@ -1,8 +1,8 @@
 # @mateusz-klatt/snapper-mcp
 
-[![npm version](https://img.shields.io/npm/v/@mateusz-klatt/snapper-mcp.svg)](https://www.npmjs.com/package/@mateusz-klatt/snapper-mcp)
-[![node](https://img.shields.io/node/v/@mateusz-klatt/snapper-mcp.svg)](https://nodejs.org/)
-[![license](https://img.shields.io/npm/l/@mateusz-klatt/snapper-mcp.svg)](./LICENSE)
+[![npm version](https://img.shields.io/npm/v/@mateusz-klatt%2Fsnapper-mcp.svg)](https://www.npmjs.com/package/@mateusz-klatt/snapper-mcp)
+[![node](https://img.shields.io/node/v/@mateusz-klatt%2Fsnapper-mcp.svg)](https://nodejs.org/)
+[![license](https://img.shields.io/npm/l/@mateusz-klatt%2Fsnapper-mcp.svg)](./LICENSE)
 [![CI](https://github.com/mateusz-klatt/snapper-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/mateusz-klatt/snapper-mcp/actions/workflows/ci.yml)
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=mateusz-klatt_snapper-mcp&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=mateusz-klatt_snapper-mcp)
 
