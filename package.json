@@ -1,0 +1,77 @@
+{
+  "name": "@snapper/mcp-client",
+  "version": "1.0.0",
+  "description": "Lightweight stdio-to-HTTP MCP bridge from Claude Desktop / Claude Code to Snapper /api/mcp.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "bin": {
+    "snapper-mcp-client": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=18.0.0 <23.0.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mateusz-klatt/snapper-mcp.git"
+  },
+  "homepage": "https://github.com/mateusz-klatt/snapper-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/mateusz-klatt/snapper-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "claude",
+    "claude-desktop",
+    "claude-code",
+    "snapper",
+    "bridge",
+    "stdio",
+    "http"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "lint": "eslint src test",
+    "typecheck": "tsc --noEmit",
+    "stdout-gate": "! grep -rE 'console\\.(log|info|debug|dir|trace|group)|process\\.stdout' src/",
+    "prepare": "simple-git-hooks || true",
+    "dev": "tsup --watch"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@typescript-eslint/eslint-plugin": "^8",
+    "@typescript-eslint/parser": "^8",
+    "@vitest/coverage-v8": "^1.6.1",
+    "eslint": "^9",
+    "globals": "^17.5.0",
+    "simple-git-hooks": "^2.11",
+    "tsup": "^8",
+    "typescript": "^5.4",
+    "vitest": "^1.6"
+  },
+  "simple-git-hooks": {
+    "pre-commit": "npx gitleaks protect --staged -v --config=.gitleaks.toml"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

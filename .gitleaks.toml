@@ -1,0 +1,14 @@
+title = "snapper-mcp gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Placeholder values + deliberately-invalid test JWTs (public repo; never commit real secrets). Regex-based only — no full-path bypass, so a real secret accidentally dropped into any file (including .env.example) still fires."
+regexes = [
+  '''jwt-placeholder''',
+  '''wallet-demo-[0-9]+''',
+  '''operator-example-[0-9]+''',
+  '''user-demo-[0-9]+''',
+  '''eyJhbGciOiJub25lIn0\.eyJzdWIiOiJ0ZXN0In0\.test''',
+]
