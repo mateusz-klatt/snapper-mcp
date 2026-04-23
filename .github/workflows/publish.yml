@@ -106,18 +106,30 @@ jobs:
         run: |
           # npm registry CDN replication can take up to a few minutes
           # after a successful publish before the package becomes visible
-          # on the standard registry endpoint. Retry up to 12 times (2
-          # min total) with 10s backoff before failing the step.
+          # on the standard registry endpoint. Retry up to 12 times with
+          # 10s backoff (≈ 2 min window) before failing the step.
+          ERROR_LOG=$(mktemp)
+          LAST_EXIT_CODE=0
           for attempt in $(seq 1 12); do
-            if npm view "@mateusz-klatt/snapper-mcp@${VERSION}" version >/dev/null 2>&1; then
+            if npm view "@mateusz-klatt/snapper-mcp@${VERSION}" version >/dev/null 2>"$ERROR_LOG"; then
               echo "Package visible on npm registry after ${attempt} attempt(s)."
+              rm -f "$ERROR_LOG"
               exit 0
             fi
-            echo "Attempt ${attempt}: registry not yet serving ${VERSION}; sleeping 10s..."
-            sleep 10
+            LAST_EXIT_CODE=$?
+            if [ "${attempt}" -lt 12 ]; then
+              echo "Attempt ${attempt}: registry not yet serving ${VERSION}; sleeping 10s..."
+              sleep 10
+            fi
           done
-          echo "Timed out waiting for registry propagation after 2 minutes."
-          echo "This does NOT mean the publish failed — check https://www.npmjs.com/package/@mateusz-klatt/snapper-mcp"
+          echo "Timed out waiting for registry propagation after ~2 minutes."
+          echo "This does NOT necessarily mean the publish failed — check https://www.npmjs.com/package/@mateusz-klatt/snapper-mcp"
+          echo "Last npm view exit code: ${LAST_EXIT_CODE}"
+          if [ -s "$ERROR_LOG" ]; then
+            echo "Last npm view error output:"
+            cat "$ERROR_LOG"
+          fi
+          rm -f "$ERROR_LOG"
           exit 1
 
       - name: Extract CHANGELOG entry for this version
