@@ -106,6 +106,15 @@ describe("TokenStore", () => {
     expect(rotatingStore.hasRefreshToken()).toBe(true);
     const patStore = new TokenStore({ access: "pat", refresh: null });
     expect(patStore.hasRefreshToken()).toBe(false);
+    const emptyStringStore = new TokenStore({ access: "pat", refresh: "" });
+    expect(emptyStringStore.hasRefreshToken()).toBe(false);
+  });
+
+  it("rotate() throws NoRefreshTokenError when refresh is an empty string (defensive parity with hasRefreshToken)", async () => {
+    const emptyRefresh = new TokenStore({ access: "pat", refresh: "" });
+    const via: RefreshFn = async () => rotated;
+    await expect(emptyRefresh.rotate(via)).rejects.toBeInstanceOf(NoRefreshTokenError);
+    expect(emptyRefresh.hasRefreshToken()).toBe(false);
   });
 
   it("late arrivals AFTER rotate settled trigger a NEW refresh cycle", async () => {
