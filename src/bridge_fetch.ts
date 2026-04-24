@@ -74,6 +74,8 @@ export function createBridgeFetch(
   performRefresh: RefreshFn,
   logger: Logger,
 ): typeof fetch {
+  const patRejectedTokens = new Set<string>();
+
   const bridgeFetch: typeof fetch = async (input, init = {}) => {
     const firstAttempt = await globalThis.fetch(input, mergeAuthHeader(init, store.accessToken()));
 
@@ -87,9 +89,13 @@ export function createBridgeFetch(
     }
 
     if (!store.hasRefreshToken()) {
-      logger.error(
-        "Access token was rejected and no SNAPPER_REFRESH_TOKEN is configured — long-lived PAT cannot auto-refresh. Regenerate the delegate in the Snapper UI.",
-      );
+      const rejectedToken = store.accessToken();
+      if (!patRejectedTokens.has(rejectedToken)) {
+        patRejectedTokens.add(rejectedToken);
+        logger.error(
+          "Access token was rejected and no SNAPPER_REFRESH_TOKEN is configured — long-lived PAT cannot auto-refresh. Regenerate the delegate in the Snapper UI.",
+        );
+      }
       return firstAttempt;
     }
 

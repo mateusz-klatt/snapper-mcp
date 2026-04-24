@@ -68,12 +68,13 @@ export class TokenStore {
       return this.inFlight;
     }
     const snapshot = this.pair;
-    if (snapshot.refresh === null) {
+    const refresh = snapshot.refresh;
+    if (refresh === null || refresh.length === 0) {
       throw new NoRefreshTokenError();
     }
     const snapshotWithRefresh: TokenPair & { refresh: string } = {
       access: snapshot.access,
-      refresh: snapshot.refresh,
+      refresh,
     };
     const inFlight = via(snapshotWithRefresh).then((next) => {
       this.pair = next;

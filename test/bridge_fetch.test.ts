@@ -302,6 +302,32 @@ describe("createBridgeFetch — 401 handling", () => {
     expect(result.status).toBe(200);
     expect(store.accessToken()).toBe("rotated-access");
   });
+
+  it("PAT mode: log-once — repeated 401s on the same access token emit stderr only once", async () => {
+    fetchMock
+      .mockResolvedValueOnce(makeResponse(401, { error_code: "invalid_bearer_token" }))
+      .mockResolvedValueOnce(makeResponse(401, { error_code: "invalid_bearer_token" }))
+      .mockResolvedValueOnce(makeResponse(401, { error_code: "invalid_bearer_token" }));
+    const store = new TokenStore({ access: "pat-access", refresh: null });
+    const errors: unknown[][] = [];
+    const logger = {
+      debug: () => {},
+      info: () => {},
+      warn: () => {},
+      error: (...args: unknown[]) => {
+        errors.push(args);
+      },
+    };
+    const via: RefreshFn = async () => ({ access: "x", refresh: "y" });
+    const bridge = createBridgeFetch(store, via, logger);
+
+    await bridge("https://example.com/api/mcp");
+    await bridge("https://example.com/api/mcp");
+    await bridge("https://example.com/api/mcp");
+    expect(errors.length).toBe(1);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
 });
 
 describe("makePerformRefresh", () => {
