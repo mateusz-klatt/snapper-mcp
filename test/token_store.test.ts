@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { NoRefreshTokenError } from "../src/errors.js";
 import { TokenStore, type RefreshFn, type TokenPair } from "../src/token_store.js";
 
 const initial: TokenPair = { access: "access-1", refresh: "refresh-1" };
@@ -89,6 +90,22 @@ describe("TokenStore", () => {
     await store.rotate(ok);
     expect(reattempted).toBe(true);
     expect(store.accessToken()).toBe("access-2");
+  });
+
+  it("throws NoRefreshTokenError when rotate runs in PAT mode (refresh=null)", async () => {
+    const patOnly: TokenPair = { access: "pat-access", refresh: null };
+    const store = new TokenStore(patOnly);
+    const via: RefreshFn = async () => rotated;
+    await expect(store.rotate(via)).rejects.toBeInstanceOf(NoRefreshTokenError);
+    expect(store.accessToken()).toBe("pat-access");
+    expect(store.hasRefreshToken()).toBe(false);
+  });
+
+  it("hasRefreshToken reflects the presence/absence of the refresh string", () => {
+    const rotatingStore = new TokenStore(initial);
+    expect(rotatingStore.hasRefreshToken()).toBe(true);
+    const patStore = new TokenStore({ access: "pat", refresh: null });
+    expect(patStore.hasRefreshToken()).toBe(false);
   });
 
   it("late arrivals AFTER rotate settled trigger a NEW refresh cycle", async () => {

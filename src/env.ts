@@ -1,17 +1,21 @@
 /**
  * Environment-variable parsing + refresh-URL derivation.
  *
- * The bridge reads exactly three env vars documented in the shipped
- * frontend snippet (`buildMcpConfigSnippet.ts`):
+ * The bridge reads:
  *
- *   - SNAPPER_BASE_URL     — points at Snapper's /api/mcp endpoint.
- *   - SNAPPER_ACCESS_TOKEN — JWT access token for bearer auth.
- *   - SNAPPER_REFRESH_TOKEN — JWT refresh token used on 401 rotation.
+ *   - SNAPPER_BASE_URL      — required. Points at Snapper's /api/mcp endpoint.
+ *   - SNAPPER_ACCESS_TOKEN  — required. JWT access token for bearer auth.
+ *   - SNAPPER_REFRESH_TOKEN — optional (since v0.2.0). JWT refresh
+ *     token used on 401 rotation. Omit or leave blank for long-lived
+ *     PAT delegates — the bridge then skips the refresh round-trip
+ *     and surfaces any 401 verbatim with a PAT-specific stderr hint.
+ *     Existing rotating-token setups that keep this env var set see
+ *     ZERO behaviour change.
  *
- * Validation is strict: any missing or blank value throws an
- * `EnvValidationError` whose message names the exact variable, so
- * operators debugging a misconfigured Claude Desktop entry see a
- * single actionable stderr line and exit cleanly.
+ * Validation is strict on required fields: any missing or blank
+ * value throws an `EnvValidationError` whose message names the
+ * exact variable, so operators debugging a misconfigured Claude
+ * Desktop entry see a single actionable stderr line and exit cleanly.
  *
  * `computeRefreshUrl` derives `{origin}/api/auth/refresh?return_tokens=true`
  * from the validated base URL. Exposing this as a named helper prevents
@@ -37,10 +41,11 @@ export class EnvValidationError extends Error {
 export interface BridgeEnv {
   readonly baseUrl: URL;
   readonly accessToken: string;
-  readonly refreshToken: string;
+  readonly refreshToken: string | null;
 }
 
-const REQUIRED_VARS = ["SNAPPER_BASE_URL", "SNAPPER_ACCESS_TOKEN", "SNAPPER_REFRESH_TOKEN"] as const;
+const REQUIRED_VARS = ["SNAPPER_BASE_URL", "SNAPPER_ACCESS_TOKEN"] as const;
+const OPTIONAL_VARS = ["SNAPPER_REFRESH_TOKEN"] as const;
 
 function requireNonEmpty(name: string, raw: string | undefined): string {
   if (raw === undefined) {
@@ -59,6 +64,12 @@ function requireNonEmpty(name: string, raw: string | undefined): string {
   return trimmed;
 }
 
+function parseOptional(raw: string | undefined): string | null {
+  if (raw === undefined) return null;
+  const trimmed = raw.trim();
+  return trimmed.length === 0 ? null : trimmed;
+}
+
 function parseUrl(name: string, raw: string): URL {
   try {
     return new URL(raw);
@@ -73,7 +84,7 @@ function parseUrl(name: string, raw: string): URL {
 export function parseEnv(source: NodeJS.ProcessEnv = process.env): BridgeEnv {
   const rawBase = requireNonEmpty("SNAPPER_BASE_URL", source["SNAPPER_BASE_URL"]);
   const accessToken = requireNonEmpty("SNAPPER_ACCESS_TOKEN", source["SNAPPER_ACCESS_TOKEN"]);
-  const refreshToken = requireNonEmpty("SNAPPER_REFRESH_TOKEN", source["SNAPPER_REFRESH_TOKEN"]);
+  const refreshToken = parseOptional(source["SNAPPER_REFRESH_TOKEN"]);
   const baseUrl = parseUrl("SNAPPER_BASE_URL", rawBase);
   if (!baseUrl.pathname.endsWith("/")) {
     baseUrl.pathname = `${baseUrl.pathname}/`;
@@ -88,3 +99,4 @@ export function computeRefreshUrl(baseUrl: URL): URL {
 }
 
 export const REQUIRED_ENV_VARS: readonly string[] = REQUIRED_VARS;
+export const OPTIONAL_ENV_VARS: readonly string[] = OPTIONAL_VARS;

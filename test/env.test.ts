@@ -58,16 +58,26 @@ describe("parseEnv", () => {
     }
   });
 
-  it("throws when SNAPPER_REFRESH_TOKEN is absent", () => {
-    try {
-      parseEnv(baseEnv({ SNAPPER_REFRESH_TOKEN: undefined }));
-      throw new Error("should have thrown");
-    } catch (error) {
-      expect(error).toBeInstanceOf(EnvValidationError);
-      if (error instanceof EnvValidationError) {
-        expect(error.variable).toBe("SNAPPER_REFRESH_TOKEN");
-      }
-    }
+  it("returns refreshToken=null when SNAPPER_REFRESH_TOKEN is absent (PAT mode since v0.2.0)", () => {
+    const result = parseEnv(baseEnv({ SNAPPER_REFRESH_TOKEN: undefined }));
+    expect(result.accessToken).toBe("access-jwt");
+    expect(result.refreshToken).toBeNull();
+  });
+
+  it("returns refreshToken=null when SNAPPER_REFRESH_TOKEN is blank (whitespace-only)", () => {
+    const result = parseEnv(baseEnv({ SNAPPER_REFRESH_TOKEN: "   " }));
+    expect(result.refreshToken).toBeNull();
+  });
+
+  it("returns refreshToken=null when SNAPPER_REFRESH_TOKEN is the empty string", () => {
+    const result = parseEnv(baseEnv({ SNAPPER_REFRESH_TOKEN: "" }));
+    expect(result.refreshToken).toBeNull();
+  });
+
+  it("legacy rotating setup with all three env vars still parses identically", () => {
+    const result = parseEnv(baseEnv());
+    expect(result.accessToken).toBe("access-jwt");
+    expect(result.refreshToken).toBe("refresh-jwt");
   });
 
   it("rejects blank (whitespace-only) tokens", () => {

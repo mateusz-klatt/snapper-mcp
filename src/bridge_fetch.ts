@@ -86,6 +86,13 @@ export function createBridgeFetch(
       return firstAttempt;
     }
 
+    if (!store.hasRefreshToken()) {
+      logger.error(
+        "Access token was rejected and no SNAPPER_REFRESH_TOKEN is configured — long-lived PAT cannot auto-refresh. Regenerate the delegate in the Snapper UI.",
+      );
+      return firstAttempt;
+    }
+
     try {
       await store.rotate(performRefresh);
     } catch (err) {

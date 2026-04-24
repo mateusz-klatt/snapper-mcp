@@ -9,7 +9,8 @@
 Lightweight stdio-to-HTTP **Model Context Protocol** bridge. Spawns as a
 subprocess, speaks MCP over stdio to Claude Desktop / Claude Code, and
 proxies every request to a Snapper backend's `/api/mcp` endpoint with
-Bearer-token auth + on-401 refresh-token rotation.
+Bearer-token auth + optional on-401 refresh-token rotation (rotating
+delegates) or single-shot long-lived PAT delegates.
 
 ## What is this
 
@@ -22,8 +23,9 @@ makes that conversation work.
 
 It is a **thin** bridge: ~1200 lines of TypeScript, using Node's
 built-in `fetch`, plus `@modelcontextprotocol/sdk` for MCP framing. No OAuth, no telemetry, no cached credentials on disk —
-tokens come from env vars, get rotated in-memory, and die with the
-process.
+tokens come from env vars. Rotating delegates rotate in-memory on 401;
+long-lived PAT delegates never rotate. Either way, credentials die with
+the process.
 
 ## Install & run
 
@@ -41,15 +43,27 @@ and ESM top-level `await`). CI validates the declared minimum
 (Node 22) across Ubuntu / macOS / Windows; higher Node versions
 work because the bridge only relies on APIs stable since Node 18.
 
-Three required env vars must be set by the MCP host before spawning:
+Two env vars are required; a third is optional. The MCP host must set
+them before spawning:
 
-| Variable | Purpose |
-| --- | --- |
-| `SNAPPER_BASE_URL` | URL of Snapper's `/api/mcp` endpoint. |
-| `SNAPPER_ACCESS_TOKEN` | JWT access token for Bearer auth (generated in Snapper UI). |
-| `SNAPPER_REFRESH_TOKEN` | JWT refresh token for on-401 rotation (generated in Snapper UI). |
+| Variable | Required? | Purpose |
+| --- | --- | --- |
+| `SNAPPER_BASE_URL` | yes | URL of Snapper's `/api/mcp` endpoint. |
+| `SNAPPER_ACCESS_TOKEN` | yes | JWT access token for Bearer auth (generated in Snapper UI). |
+| `SNAPPER_REFRESH_TOKEN` | optional (since v0.2.0) | JWT refresh token for on-401 rotation. Required for rotating-token delegates; **omit or leave blank for long-lived PAT delegates** — the bridge then surfaces any 401 verbatim instead of trying to rotate. |
 
 See [`.env.example`](./.env.example) for placeholder values.
+
+### Token types
+
+Snapper delegates are minted in one of two modes:
+
+- **Rotating** (default) — short-lived access token (15 min) + refresh
+  token (7 days). Paste both env vars; the bridge auto-rotates on 401.
+- **Long-lived PAT** (opt-in) — single access token with a ~10-year
+  expiry, no refresh. Paste only `SNAPPER_ACCESS_TOKEN`; leave
+  `SNAPPER_REFRESH_TOKEN` unset. Revoke by deactivating the delegate
+  in the Snapper UI.
 
 ## Claude Desktop integration
 
@@ -82,11 +96,21 @@ restart the Claude Code CLI.
 
 ## Generating tokens
 
-Snapper ships a **Settings → AI Delegates** UI that generates the two
-JWTs for you. Each delegate has configurable caps (per-order max USD
-value, per-day / per-month ceilings, allowed order types). Tokens are
-bound to the delegate's permissions + wallet scope; revoke the delegate
-in-place to kill the bridge live.
+Snapper ships a **Settings → AI Delegates** UI that issues credentials.
+Two modes are supported:
+
+- **Rotating delegate**: emits an access + refresh JWT pair. Paste both
+  (`SNAPPER_ACCESS_TOKEN` + `SNAPPER_REFRESH_TOKEN`); the bridge
+  auto-rotates on 401.
+- **Long-lived PAT delegate**: emits a single access JWT with a
+  ~10-year expiry and no refresh token. Paste only
+  `SNAPPER_ACCESS_TOKEN`. Regenerate (by deactivating + recreating the
+  delegate) to rotate.
+
+Each delegate has configurable caps (per-order max USD value, per-day /
+per-month ceilings, allowed order types). Tokens are bound to the
+delegate's permissions + wallet scope; revoke the delegate in-place to
+kill the bridge live.
 
 ## Logging
 
@@ -109,16 +133,23 @@ On every outbound HTTP request, the bridge injects
 `Authorization: Bearer ${SNAPPER_ACCESS_TOKEN}` while preserving any
 `Accept` / `Content-Type` / other headers the SDK set.
 
-On 401 with `error_code: "invalid_bearer_token"`, the bridge triggers
-a single-flight refresh via Snapper's `/api/auth/refresh?return_tokens=true`
-(POST with Bearer refresh header), updates the in-memory token pair,
-and retries the original request **once**. If the retry is also 401,
-the error surfaces verbatim to the MCP host — no refresh storm.
+On 401 with `error_code: "invalid_bearer_token"`, the bridge behaviour
+depends on whether `SNAPPER_REFRESH_TOKEN` is set:
 
-N concurrent 401s under load share ONE refresh call. Token rotation is
-race-tight: the new access token is published BEFORE the in-flight
-refresh promise clears, so no caller can observe the old token after
-rotation completes.
+- **Rotating mode** (refresh token set): single-flight refresh via
+  Snapper's `/api/auth/refresh?return_tokens=true` (POST with Bearer
+  refresh header), update the in-memory token pair, retry the
+  original request **once**. If the retry is also 401, the error
+  surfaces verbatim to the MCP host — no refresh storm.
+- **Long-lived PAT mode** (refresh token absent/blank): the bridge
+  skips the refresh round-trip entirely and surfaces the 401
+  verbatim. A PAT-specific stderr line hints that the access token
+  was rejected and must be regenerated via the Snapper UI.
+
+In rotating mode, N concurrent 401s under load share ONE refresh
+call. Token rotation is race-tight: the new access token is published
+BEFORE the in-flight refresh promise clears, so no caller can observe
+the old token after rotation completes.
 
 ## Error handling
 
@@ -131,9 +162,11 @@ Three surfaces, each handled at the right layer:
 surfaces as `McpError` / JSON-RPC error envelopes. The bridge passes
 these through to the MCP host verbatim; Claude's agent sees the
 original `error_code` + message. The one exception is
-`invalid_bearer_token`: the bridge intercepts it, rotates the refresh
-token via `/api/auth/refresh`, and retries the original request once
-before giving up.
+`invalid_bearer_token`: in rotating mode the bridge intercepts it,
+rotates the refresh token via `/api/auth/refresh`, and retries the
+original request once before giving up. In long-lived PAT mode (no
+`SNAPPER_REFRESH_TOKEN`) the 401 is surfaced verbatim without a
+refresh attempt.
 
 **Refresh-path errors** (5 mapped scenarios: rejected, malformed
 body, 5xx, network error, timeout) log a specific stderr message via
@@ -188,7 +221,7 @@ land on stderr — stdout is reserved for MCP JSON-RPC frames.
 | --- | --- | --- |
 | `Missing required environment variable SNAPPER_BASE_URL` | `SNAPPER_BASE_URL` is not set or is whitespace-only. | Set it in your MCP host's `.mcp-config.json` env block. |
 | `Missing required environment variable SNAPPER_ACCESS_TOKEN` | Same, for the access token. | Generate one in the Snapper UI and set it. |
-| `Missing required environment variable SNAPPER_REFRESH_TOKEN` | Same, for the refresh token. | Same. |
+| `Access token was rejected and no SNAPPER_REFRESH_TOKEN is configured` | 401 `invalid_bearer_token` in long-lived PAT mode — the access token has been revoked or the delegate deactivated. | Regenerate the delegate in the Snapper UI and replace `SNAPPER_ACCESS_TOKEN`. |
 | `Environment variable SNAPPER_BASE_URL is not a valid URL` | URL is set but unparseable (e.g. missing scheme). | Use a form like `http://localhost:8000/api/mcp` or `https://snapper.example.com/api/mcp`. |
 | `MCP handshake to Snapper failed at startup` | The bridge could not complete the initial MCP `initialize` call. | Check that `SNAPPER_BASE_URL` points at `/api/mcp` (not a different endpoint) and that the backend is healthy. |
 
@@ -212,7 +245,7 @@ Claude's agent sees the backend's `error_code` verbatim.
 | `feature_disabled` (503) | Snapper's `ai_integration_enabled` feature flag is off. | Ask an admin to enable it. |
 | `user_deactivated` (401) | Your Snapper user account was deactivated. | Contact an admin to reactivate. |
 | `missing_bearer_token` (401) | Bridge did not send a bearer header. | Check SNAPPER_ACCESS_TOKEN is set; should not reach you in normal operation. |
-| `invalid_bearer_token` (401) | Access JWT expired / revoked. | Bridge attempts refresh + retry once; if both fail, regenerate tokens. |
+| `invalid_bearer_token` (401) | Access JWT expired / revoked. | In rotating mode the bridge attempts refresh + retry once; if both fail, regenerate tokens. In long-lived PAT mode (no `SNAPPER_REFRESH_TOKEN`) the 401 is surfaced verbatim — regenerate the delegate via the Snapper UI. |
 | `mcp_unavailable` (503) | Server-side MCP init incomplete (transient infrastructure bug). | Bridge retries once with 1 s backoff; if it persists, check backend logs. |
 | `rate_limit_exceeded` (429) | Per-principal throttle hit. | Retry later or ask an admin to raise the cap. |
 
