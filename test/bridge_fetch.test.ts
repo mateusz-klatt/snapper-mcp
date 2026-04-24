@@ -251,6 +251,57 @@ describe("createBridgeFetch — 401 handling", () => {
     expect(roundtripped.error_code).toBe("invalid_bearer_token");
     expect(roundtripped.extra).toBe("downstream");
   });
+
+  it("PAT mode: on 401 invalid_bearer_token skips rotation when refresh is null", async () => {
+    fetchMock.mockResolvedValueOnce(makeResponse(401, { error_code: "invalid_bearer_token" }));
+    const store = new TokenStore({ access: "pat-access", refresh: null });
+    let rotated = false;
+    const via: RefreshFn = async () => {
+      rotated = true;
+      return { access: "x", refresh: "y" };
+    };
+    const bridge = createBridgeFetch(store, via, makeSilentLogger());
+
+    const result = await bridge("https://example.com/api/mcp");
+    expect(result.status).toBe(401);
+    expect(rotated).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("PAT mode: logs a PAT-specific stderr message when the access token is rejected", async () => {
+    fetchMock.mockResolvedValueOnce(makeResponse(401, { error_code: "invalid_bearer_token" }));
+    const store = new TokenStore({ access: "pat-access", refresh: null });
+    const errors: unknown[][] = [];
+    const logger = {
+      debug: () => {},
+      info: () => {},
+      warn: () => {},
+      error: (...args: unknown[]) => {
+        errors.push(args);
+      },
+    };
+    const via: RefreshFn = async () => ({ access: "x", refresh: "y" });
+    const bridge = createBridgeFetch(store, via, logger);
+
+    await bridge("https://example.com/api/mcp");
+    expect(errors.length).toBeGreaterThan(0);
+    const flat = errors.flat().join(" ");
+    expect(flat).toMatch(/SNAPPER_REFRESH_TOKEN/);
+    expect(flat).toMatch(/PAT/i);
+  });
+
+  it("PAT mode: rotating setup with refresh token set still rotates (regression)", async () => {
+    fetchMock
+      .mockResolvedValueOnce(makeResponse(401, { error_code: "invalid_bearer_token" }))
+      .mockResolvedValueOnce(makeResponse(200, { ok: true }));
+    const store = makeStore("old-access", "old-refresh");
+    const via: RefreshFn = async () => ({ access: "rotated-access", refresh: "rotated-refresh" });
+    const bridge = createBridgeFetch(store, via, makeSilentLogger());
+
+    const result = await bridge("https://example.com/api/mcp");
+    expect(result.status).toBe(200);
+    expect(store.accessToken()).toBe("rotated-access");
+  });
 });
 
 describe("makePerformRefresh", () => {

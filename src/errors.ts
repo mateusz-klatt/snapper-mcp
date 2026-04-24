@@ -56,6 +56,21 @@ export class BridgeStartupError extends Error {
   }
 }
 
+/**
+ * Raised when the bridge is configured in long-lived PAT mode (no
+ * SNAPPER_REFRESH_TOKEN) AND the backend rejects the access token
+ * with a 401 `invalid_bearer_token`. The bridge cannot auto-refresh
+ * because there is no refresh token to trade in; callers see the
+ * 401 verbatim and this class is used by `TokenStore.rotate()` to
+ * guard against accidental rotation attempts in PAT mode.
+ */
+export class NoRefreshTokenError extends Error {
+  constructor() {
+    super("no SNAPPER_REFRESH_TOKEN configured — long-lived PAT cannot auto-refresh");
+    this.name = "NoRefreshTokenError";
+  }
+}
+
 export interface RefreshErrorMapping {
   readonly pattern: RegExp;
   readonly message: string;

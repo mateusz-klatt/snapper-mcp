@@ -141,12 +141,12 @@ describe("bridge subprocess — env failure paths", () => {
     expect(stderrChunks.join("")).toMatch(/SNAPPER_ACCESS_TOKEN/);
   });
 
-  it("exits 1 with actionable stderr when SNAPPER_REFRESH_TOKEN is missing", async () => {
+  it("starts WITHOUT SNAPPER_REFRESH_TOKEN (PAT mode) — env validation passes, fails later at handshake", async () => {
     const child = spawn(process.execPath, [DIST_ENTRY], {
       env: {
         ...process.env,
-        SNAPPER_BASE_URL: "http://localhost:8000/api/mcp",
-        SNAPPER_ACCESS_TOKEN: "a",
+        SNAPPER_BASE_URL: "http://127.0.0.1:1/api/mcp",
+        SNAPPER_ACCESS_TOKEN: "pat-access",
         SNAPPER_REFRESH_TOKEN: undefined,
       },
       stdio: ["pipe", "pipe", "pipe"],
@@ -155,7 +155,9 @@ describe("bridge subprocess — env failure paths", () => {
     child.stderr.on("data", (chunk: Buffer) => stderrChunks.push(chunk.toString("utf8")));
     const [code] = (await once(child, "exit")) as [number | null];
     expect(code).toBe(1);
-    expect(stderrChunks.join("")).toMatch(/SNAPPER_REFRESH_TOKEN/);
+    const stderr = stderrChunks.join("");
+    expect(stderr).not.toMatch(/Missing required environment variable SNAPPER_REFRESH_TOKEN/);
+    expect(stderr).toMatch(/MCP handshake to Snapper failed at startup/);
   });
 });
 

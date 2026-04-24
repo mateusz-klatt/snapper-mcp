@@ -2,11 +2,21 @@
  * In-memory token pair storage with race-tight single-flight rotation.
  *
  * Owned by `bridge_fetch`'s custom `fetch` wrapper. Holds the current
- * access+refresh pair and coordinates refresh so that N concurrent
- * 401 responses trigger exactly ONE `performRefresh` call; every
- * caller awaits the same promise and sees the same new pair.
+ * access token and optional refresh token; coordinates refresh so
+ * that N concurrent 401 responses trigger exactly ONE `performRefresh`
+ * call; every caller awaits the same promise and sees the same new
+ * pair.
  *
- * Race-tightness invariant:
+ * PAT mode (since v0.2.0):
+ *
+ *   When the operator configures the bridge without SNAPPER_REFRESH_TOKEN
+ *   (i.e. the delegate was minted with `long_lived=True` on the
+ *   Snapper backend), `TokenPair.refresh` is `null`. `rotate()` then
+ *   throws `NoRefreshTokenError` instead of attempting a refresh —
+ *   callers (notably `bridge_fetch`) branch on this condition to
+ *   surface the 401 verbatim without burning the cycle.
+ *
+ * Race-tightness invariant (rotating mode):
  *
  *   The publication of the rotated pair (`this.pair = next`) runs
  *   INSIDE the `.then` continuation of the `performRefresh` promise,
@@ -24,12 +34,14 @@
  * the next 401 triggers a fresh rotate attempt.
  */
 
+import { NoRefreshTokenError } from "./errors.js";
+
 export interface TokenPair {
   readonly access: string;
-  readonly refresh: string;
+  readonly refresh: string | null;
 }
 
-export type RefreshFn = (current: TokenPair) => Promise<TokenPair>;
+export type RefreshFn = (current: TokenPair & { refresh: string }) => Promise<TokenPair>;
 
 export class TokenStore {
   private pair: TokenPair;
@@ -47,12 +59,23 @@ export class TokenStore {
     return this.pair;
   }
 
+  hasRefreshToken(): boolean {
+    return typeof this.pair.refresh === "string" && this.pair.refresh.length > 0;
+  }
+
   async rotate(via: RefreshFn): Promise<TokenPair> {
     if (this.inFlight !== null) {
       return this.inFlight;
     }
     const snapshot = this.pair;
-    const inFlight = via(snapshot).then((next) => {
+    if (snapshot.refresh === null) {
+      throw new NoRefreshTokenError();
+    }
+    const snapshotWithRefresh: TokenPair & { refresh: string } = {
+      access: snapshot.access,
+      refresh: snapshot.refresh,
+    };
+    const inFlight = via(snapshotWithRefresh).then((next) => {
       this.pair = next;
       return next;
     });
