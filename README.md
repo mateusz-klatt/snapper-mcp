@@ -5,6 +5,7 @@
 [![license](https://img.shields.io/npm/l/@mateusz-klatt%2Fsnapper-mcp.svg?v=2)](./LICENSE)
 [![CI](https://github.com/mateusz-klatt/snapper-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/mateusz-klatt/snapper-mcp/actions/workflows/ci.yml)
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=mateusz-klatt_snapper-mcp&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=mateusz-klatt_snapper-mcp)
+[![Claude Code Plugin](https://img.shields.io/badge/Claude_Code-Plugin-ff6a00)](#install)
 
 Lightweight stdio-to-HTTP **Model Context Protocol** bridge. Spawns as a
 subprocess, speaks MCP over stdio to Claude Desktop / Claude Code, and
@@ -27,21 +28,82 @@ tokens come from env vars. Rotating delegates rotate in-memory on 401;
 long-lived PAT delegates never rotate. Either way, credentials die with
 the process.
 
-## Install & run
+## Install
+
+Three install paths, in recommended order. All three end at the same
+runtime — pick whichever matches your MCP host.
+
+### Option 1 — Claude Code plugin (recommended, since v0.2.1)
+
+In any Claude Code session:
+
+```text
+/plugin marketplace add mateusz-klatt/snapper-mcp
+/plugin install snapper-mcp@mateusz-klatt-snapper-mcp
+```
+
+Claude Code prompts for two required values plus one optional value:
+
+- **Snapper API URL** — your backend's `/api/mcp` endpoint.
+- **Access token** — paste from Snapper's *Settings -> AI Delegates*
+  page (the config-snippet generator).
+- **Refresh token** *(optional)* — paste for rotating-token delegates;
+  **leave blank** for long-lived PAT delegates.
+
+Plugin changes installed mid-session need `/reload-plugins` (or a
+Claude Code restart) before the MCP server starts. After reloading,
+`/mcp list` should show the `snapper` server connected.
+
+The plugin manifest threads the three values into the bridge
+subprocess as env vars via `${user_config.KEY}` interpolation. Claude
+Code stores `sensitive: true` values (the access + refresh tokens) in
+the OS keychain when available, falling back to
+`~/.claude/.credentials.json` — they never land in `settings.json` or
+the manifest. The bridge process itself caches nothing on disk;
+credentials die with the subprocess.
+
+### Option 2 — Claude Desktop manual config
+
+Add to your Claude Desktop config
+(`~/Library/Application Support/Claude/claude_desktop_config.json` on
+macOS, `%APPDATA%\Claude\claude_desktop_config.json` on Windows):
+
+```json
+{
+  "mcpServers": {
+    "snapper": {
+      "command": "npx",
+      "args": ["-y", "@mateusz-klatt/snapper-mcp"],
+      "env": {
+        "SNAPPER_BASE_URL": "https://your-snapper-instance.example.com/api/mcp",
+        "SNAPPER_ACCESS_TOKEN": "<generated via Snapper UI: Settings -> AI Delegates>",
+        "SNAPPER_REFRESH_TOKEN": "<generated via Snapper UI: Settings -> AI Delegates>"
+      }
+    }
+  }
+}
+```
+
+For long-lived PAT delegates, omit `SNAPPER_REFRESH_TOKEN` or set it
+to `""`. Restart Claude Desktop; the Snapper server shows up in the
+MCP Servers settings panel.
+
+### Option 3 — Direct CLI / custom hosts
 
 ```bash
-# One-shot via npx (recommended — matches what Claude Desktop + Claude Code do):
-npx -y @mateusz-klatt/snapper-mcp
+# One-shot via npx (matches Option 2 under the hood):
+SNAPPER_BASE_URL="..." SNAPPER_ACCESS_TOKEN="..." \
+  npx -y @mateusz-klatt/snapper-mcp
 
 # Or install globally:
 npm install -g @mateusz-klatt/snapper-mcp
-snapper-mcp
+SNAPPER_BASE_URL="..." SNAPPER_ACCESS_TOKEN="..." snapper-mcp
 ```
 
 Requires **Node 22+** (uses Node's built-in `fetch`, `AbortController`,
 and ESM top-level `await`). CI validates the declared minimum
-(Node 22) across Ubuntu / macOS / Windows; higher Node versions
-work because the bridge only relies on APIs stable since Node 18.
+(Node 22) across Ubuntu / macOS / Windows; higher Node versions work
+because the bridge only relies on APIs stable since Node 18.
 
 Two env vars are required; a third is optional. The MCP host must set
 them before spawning:
@@ -50,7 +112,7 @@ them before spawning:
 | --- | --- | --- |
 | `SNAPPER_BASE_URL` | yes | URL of Snapper's `/api/mcp` endpoint. |
 | `SNAPPER_ACCESS_TOKEN` | yes | JWT access token for Bearer auth (generated in Snapper UI). |
-| `SNAPPER_REFRESH_TOKEN` | optional (since v0.2.0) | JWT refresh token for on-401 rotation. Required for rotating-token delegates; **omit or leave blank for long-lived PAT delegates** — the bridge then surfaces any 401 verbatim instead of trying to rotate. |
+| `SNAPPER_REFRESH_TOKEN` | optional (since v0.2.0) | JWT refresh token for on-401 rotation. Required for rotating-token delegates; **omit or leave blank for long-lived PAT delegates** - the bridge then surfaces any 401 verbatim instead of trying to rotate. |
 
 See [`.env.example`](./.env.example) for placeholder values.
 
@@ -62,37 +124,12 @@ Snapper delegates are minted in one of two modes:
   token (7 days). Paste both env vars; the bridge auto-rotates on 401.
 - **Long-lived PAT** (opt-in) — single access token with a ~10-year
   expiry, no refresh. Paste only `SNAPPER_ACCESS_TOKEN`; leave
-  `SNAPPER_REFRESH_TOKEN` unset. Revoke by deactivating the delegate
-  in the Snapper UI.
+  `SNAPPER_REFRESH_TOKEN` unset (or blank). Revoke by deactivating the
+  delegate in the Snapper UI.
 
-## Claude Desktop integration
-
-Add to your Claude Desktop config (e.g. `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
-
-```json
-{
-  "mcpServers": {
-    "snapper": {
-      "command": "npx",
-      "args": ["-y", "@mateusz-klatt/snapper-mcp"],
-      "env": {
-        "SNAPPER_BASE_URL": "https://your-snapper-instance.example.com/api/mcp",
-        "SNAPPER_ACCESS_TOKEN": "<generated via Snapper UI: Settings → AI Delegates>",
-        "SNAPPER_REFRESH_TOKEN": "<generated via Snapper UI: Settings → AI Delegates>"
-      }
-    }
-  }
-}
-```
-
-Restart Claude Desktop; your Snapper instance appears in the MCP server
-list. Confirm tools load via the MCP Servers settings panel.
-
-## Claude Code integration
-
-Claude Code uses the same `.mcp-config.json` format. Drop the snippet
-above into your project's `.mcp-config.json` (or the global config) and
-restart the Claude Code CLI.
+In Option 1 (plugin), Claude Code surfaces the refresh token field as
+optional — leaving it blank routes the bridge into PAT mode at the
+host-config layer, no further action needed.
 
 ## Generating tokens
 

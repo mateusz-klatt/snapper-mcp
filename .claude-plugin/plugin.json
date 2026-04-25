@@ -1,0 +1,54 @@
+{
+  "name": "snapper-mcp",
+  "version": "0.2.1",
+  "description": "Connects Claude Code / Claude Desktop to a Snapper trading backend via the /api/mcp endpoint.",
+  "author": {
+    "name": "Mateusz Klatt",
+    "url": "https://github.com/mateusz-klatt"
+  },
+  "homepage": "https://github.com/mateusz-klatt/snapper-mcp#readme",
+  "repository": "https://github.com/mateusz-klatt/snapper-mcp",
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "snapper",
+    "trading",
+    "bridge",
+    "claude-code",
+    "claude-desktop"
+  ],
+  "userConfig": {
+    "SNAPPER_BASE_URL": {
+      "type": "string",
+      "title": "Snapper API URL",
+      "description": "Your Snapper backend MCP endpoint, e.g. https://snapper.example.com/api/mcp - generate from Snapper's AI Integration settings page.",
+      "required": true
+    },
+    "SNAPPER_ACCESS_TOKEN": {
+      "type": "string",
+      "title": "Access token",
+      "description": "JWT or long-lived PAT. Paste from Snapper's AI Integration config-snippet generator. Auto-refreshed when paired with a refresh token (see below).",
+      "required": true,
+      "sensitive": true
+    },
+    "SNAPPER_REFRESH_TOKEN": {
+      "type": "string",
+      "title": "Refresh token (optional - leave blank for long-lived PAT delegates)",
+      "description": "Long-lived JWT for auto-rotation. Paste for rotating-token delegates. LEAVE BLANK for delegates minted with long_lived=true (single ~10-year access token, no refresh).",
+      "required": false,
+      "sensitive": true
+    }
+  },
+  "mcpServers": {
+    "snapper": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@mateusz-klatt/snapper-mcp@0.2.0"],
+      "env": {
+        "SNAPPER_BASE_URL": "${user_config.SNAPPER_BASE_URL}",
+        "SNAPPER_ACCESS_TOKEN": "${user_config.SNAPPER_ACCESS_TOKEN}",
+        "SNAPPER_REFRESH_TOKEN": "${user_config.SNAPPER_REFRESH_TOKEN}"
+      }
+    }
+  }
+}
