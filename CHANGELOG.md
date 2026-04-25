@@ -11,6 +11,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - (next release TBD)
 
+## [0.2.2]
+
+Runtime release covering post-0.2.0 bridge UX fixes plus a plugin
+manifest re-pin so Claude Code plugin v0.2.2 users land on this
+runtime instead of v0.2.0.
+
+### Added
+
+- Plugin manifest tag `v0.2.2`. `mcpServers.args` now pins
+  `@mateusz-klatt/snapper-mcp@0.2.2`, replacing the v0.2.1 tag's
+  pin to `@0.2.0`. `/plugin install snapper-mcp@mateusz-klatt-snapper-mcp`
+  in a fresh Claude Code session resolves to this runtime; existing
+  plugin installs receive it on `/plugin update snapper-mcp` or next
+  marketplace refresh.
+
+### Changed
+
+- `bridge_fetch.ts` PAT-mode 401 stderr is now rate-limited per
+  access token. The bridge tracks which access tokens have been
+  warned about and emits "Access token was rejected and no
+  SNAPPER_REFRESH_TOKEN is configured" exactly once per access
+  token, preventing stderr flooding when the MCP host retries many
+  times against an invalid long-lived token. Rotating-mode path is
+  unaffected.
+- `TokenStore.rotate()` now guards on both `null` and empty-string
+  refresh values, matching `hasRefreshToken()`'s semantics.
+  Defensive: `parseEnv` never yields an empty refresh token, but
+  manual `TokenStore` construction could, and the two methods now
+  agree.
+- `NoRefreshTokenError` docstring narrowed to the actual invariant
+  it enforces (rotate attempted without a refresh token) rather
+  than the 401 caller context. Call-site context kept as a
+  cross-reference.
+
+### Tests
+
+- `bridge_fetch.test.ts` — 3 repeated 401s against the same PAT
+  emit exactly one stderr line.
+- `token_store.test.ts` — `hasRefreshToken()` returns false for
+  empty-string refresh, and `rotate()` throws `NoRefreshTokenError`
+  in that case.
+
+### Notes
+
+- The npm `0.2.1` slot is intentionally skipped: `v0.2.1` is the
+  plugin-surface git tag introducing the marketplace integration
+  (manifests + README + CHANGELOG), with no runtime change. This
+  release advances the runtime by a single semver patch.
+- npm provenance attestations remain enabled (`--provenance`).
+
 ## [0.2.1]
 
 Plugin-surface release: introduces the Claude Code plugin marketplace

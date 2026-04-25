@@ -1,6 +1,6 @@
 {
   "name": "snapper-mcp",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Connects Claude Code / Claude Desktop to a Snapper trading backend via the /api/mcp endpoint.",
   "author": {
     "name": "Mateusz Klatt",
@@ -43,7 +43,7 @@
     "snapper": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@mateusz-klatt/snapper-mcp@0.2.0"],
+      "args": ["-y", "@mateusz-klatt/snapper-mcp@0.2.2"],
       "env": {
         "SNAPPER_BASE_URL": "${user_config.SNAPPER_BASE_URL}",
         "SNAPPER_ACCESS_TOKEN": "${user_config.SNAPPER_ACCESS_TOKEN}",

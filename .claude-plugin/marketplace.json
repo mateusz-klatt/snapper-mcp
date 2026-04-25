@@ -6,13 +6,13 @@
   },
   "metadata": {
     "description": "Claude Code <-> Snapper MCP bridge - trade via natural language.",
-    "version": "0.2.1"
+    "version": "0.2.2"
   },
   "plugins": [
     {
       "name": "snapper-mcp",
       "source": "./",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "description": "Connects Claude Code / Claude Desktop to a Snapper trading backend via the /api/mcp endpoint.",
       "author": {
         "name": "Mateusz Klatt",
