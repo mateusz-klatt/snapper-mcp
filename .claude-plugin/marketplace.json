@@ -1,0 +1,34 @@
+{
+  "name": "mateusz-klatt-snapper-mcp",
+  "owner": {
+    "name": "Mateusz Klatt",
+    "url": "https://github.com/mateusz-klatt"
+  },
+  "metadata": {
+    "description": "Claude Code <-> Snapper MCP bridge - trade via natural language.",
+    "version": "0.2.1"
+  },
+  "plugins": [
+    {
+      "name": "snapper-mcp",
+      "source": "./",
+      "version": "0.2.1",
+      "description": "Connects Claude Code / Claude Desktop to a Snapper trading backend via the /api/mcp endpoint.",
+      "author": {
+        "name": "Mateusz Klatt",
+        "url": "https://github.com/mateusz-klatt"
+      },
+      "homepage": "https://github.com/mateusz-klatt/snapper-mcp#readme",
+      "repository": "https://github.com/mateusz-klatt/snapper-mcp",
+      "license": "MIT",
+      "keywords": [
+        "mcp",
+        "snapper",
+        "trading",
+        "bridge",
+        "claude-code",
+        "claude-desktop"
+      ]
+    }
+  ]
+}

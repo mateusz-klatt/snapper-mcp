@@ -11,6 +11,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - (next release TBD)
 
+## [0.2.1]
+
+Plugin-surface release: introduces the Claude Code plugin marketplace
+integration. The MCP runtime executed by `/plugin install` is the
+published npm package `@mateusz-klatt/snapper-mcp@0.2.0` — Claude Code
+launches it via `npx -y @mateusz-klatt/snapper-mcp@0.2.0`, pinned in
+`mcpServers.args` so future runtime publishes do not silently upgrade
+plugin `v0.2.1` users.
+
+### Added
+
+- Claude Code plugin marketplace integration. `/plugin marketplace add
+  mateusz-klatt/snapper-mcp` followed by `/plugin install
+  snapper-mcp@mateusz-klatt-snapper-mcp` followed by `/reload-plugins`
+  (or a Claude Code restart) produces a working MCP server. Two
+  required values plus one optional refresh token are prompted at
+  install time via `userConfig`; the values thread to the bridge
+  subprocess via `${user_config.KEY}` interpolation. Long-lived PAT
+  delegates leave the refresh field blank — no further client-side
+  action.
+- `.claude-plugin/marketplace.json` and `.claude-plugin/plugin.json`
+  manifests in the public repo root, sourced from `./` so the same
+  commit serves both the npm package and the plugin marketplace.
+- Claude Code Plugin badge in README pointing at the new Install
+  section.
+
+### Changed
+
+- README "Install & run" reorganised into three options (plugin /
+  Claude Desktop manual / direct CLI), surfacing the plugin install
+  path first as the recommended flow. Token-types subsection clarifies
+  PAT-mode UX inside the plugin install (leave refresh blank).
+- Plugin-install storage note updated: `sensitive: true` `userConfig`
+  values land in the OS keychain (with `~/.claude/.credentials.json`
+  fallback) per Claude Code plugin behaviour — never in
+  `settings.json` or the manifest. The bridge subprocess itself
+  caches nothing on disk.
+
+### Notes
+
+- The dist tarball delivered by the plugin is unchanged from v0.2.0;
+  same provenance on npm. The `v0.2.1` git tag bumps plugin metadata
+  only.
+- The git working tree at this tag also contains commit `0a3454b`
+  (post-0.2.0 bridge UX fixes: PAT stderr rate-limit, `TokenStore.rotate`
+  empty-string parity, `NoRefreshTokenError` docstring narrowing).
+  Those are NOT part of the plugin runtime — `/plugin install` runs
+  the published npm `0.2.0` artifact, which predates `0a3454b`. The
+  fixes ship to plugin users when npm **`0.2.2`** publishes and a
+  follow-up plugin tag re-pins `mcpServers.args` to `@0.2.2`. The
+  `0.2.1` runtime slot is intentionally skipped (reserved for this
+  plugin-surface tag).
+
 ## [0.2.0]
 
 ### Added
