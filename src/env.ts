@@ -98,5 +98,53 @@ export function computeRefreshUrl(baseUrl: URL): URL {
   return refresh;
 }
 
+/**
+ * Derive the WS endpoint URL for the upcoming `snapper-mcp watch`
+ * subcommand from the validated `/api/mcp` base URL.
+ *
+ * Rejects any base URL whose pathname is not exactly `/api/mcp`
+ * (with or without a trailing slash). This prevents two foot-guns:
+ *
+ *   1. Silently appending `/api/ws` to a misconfigured base such as
+ *      `http://localhost:8000/api/mcp/api/ws`, which would 404 on
+ *      every connect.
+ *   2. Letting an operator who set `SNAPPER_BASE_URL` to the wrong
+ *      origin (e.g. the bare host without `/api/mcp`) ship a
+ *      partially functional bridge — the proxy path would still
+ *      authenticate, but the watch subcommand would silently drop
+ *      events.
+ *
+ * Scheme conversion: `http` → `ws`, `https` → `wss`. Any other
+ * scheme throws — `wss://` and `ws://` baseUrls are rejected
+ * symmetrically because Snapper's combined MCP + WS API runs over
+ * HTTP(S) and the bridge MUST not be configured against a bare WS
+ * host.
+ *
+ * Strips any query string + hash. The caller adds connect-time
+ * authentication credentials separately (the WebSocket wire
+ * contract delivers the ws_token via the post-upgrade `authenticate`
+ * frame, not as a URL parameter).
+ */
+export function computeWsUrl(baseUrl: URL): URL {
+  if (baseUrl.protocol !== "http:" && baseUrl.protocol !== "https:") {
+    throw new EnvValidationError(
+      `snapper-mcp watch requires an http:// or https:// base URL; got ${JSON.stringify(baseUrl.protocol)}.`,
+      "SNAPPER_BASE_URL",
+    );
+  }
+  const normalised = baseUrl.pathname.endsWith("/")
+    ? baseUrl.pathname.slice(0, -1)
+    : baseUrl.pathname;
+  if (normalised !== "/api/mcp") {
+    throw new EnvValidationError(
+      `snapper-mcp watch requires SNAPPER_BASE_URL pathname /api/mcp; got ${JSON.stringify(baseUrl.pathname)}.`,
+      "SNAPPER_BASE_URL",
+    );
+  }
+  const wsScheme = baseUrl.protocol === "https:" ? "wss:" : "ws:";
+  const wsUrl = new URL(`${wsScheme}//${baseUrl.host}/api/ws`);
+  return wsUrl;
+}
+
 export const REQUIRED_ENV_VARS: readonly string[] = REQUIRED_VARS;
 export const OPTIONAL_ENV_VARS: readonly string[] = OPTIONAL_VARS;
