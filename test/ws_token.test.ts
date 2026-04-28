@@ -318,6 +318,45 @@ describe("fetchWsToken — burned-refresh safety", () => {
     expect(store.accessToken()).toBe("a-old");
     expect(store.current()).toEqual({ access: "a-old", refresh: "r-old" });
   });
+
+  it("rejects when the refresh response body is not a JSON object (e.g. JSON string)", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify("not an object"), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    const store = makeStore("a-old", "r-old");
+    await expect(
+      fetchWsToken(new URL("http://localhost:8000/api/mcp"), store, makeSilentLogger()),
+    ).rejects.toMatchObject({
+      name: "RefreshFailedError",
+      status: 200,
+      message: expect.stringMatching(/body is not a JSON object/i),
+    });
+    expect(store.accessToken()).toBe("a-old");
+  });
+
+  it("rejects when payload.refresh_token is missing or empty", async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeResponse(200, {
+        payload: {
+          access_token: "rot-a",
+          ws_token: "ws",
+          ws_token_exp: "2026-04-27T12:00:00Z",
+        },
+      }),
+    );
+    const store = makeStore("a-old", "r-old");
+    await expect(
+      fetchWsToken(new URL("http://localhost:8000/api/mcp"), store, makeSilentLogger()),
+    ).rejects.toMatchObject({
+      name: "RefreshFailedError",
+      status: 200,
+      message: expect.stringMatching(/refresh_token missing or empty/i),
+    });
+    expect(store.accessToken()).toBe("a-old");
+  });
 });
 
 describe("fetchWsToken — HTTP error paths", () => {

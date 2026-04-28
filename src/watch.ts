@@ -153,7 +153,7 @@ function resolveStdout(opt: WatchOptions["stdout"]): JsonlSink {
   };
 }
 
-function resolveSignalSource(opt: SignalSource | undefined): SignalSource {
+export function resolveSignalSource(opt: SignalSource | undefined): SignalSource {
   if (opt !== undefined) return opt;
   return {
     on: (signal, handler) => {

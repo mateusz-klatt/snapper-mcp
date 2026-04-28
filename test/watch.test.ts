@@ -5,6 +5,7 @@ import { TokenStore } from "../src/token_store.js";
 import type { ServerFrame } from "../src/types.js";
 import {
   parseWatchArgs,
+  resolveSignalSource,
   WatchArgsError,
   watchMain,
   type SignalSource,
@@ -387,6 +388,66 @@ describe("watchMain — error paths", () => {
         stdout: { write: () => undefined },
       }),
     ).rejects.toThrow("synthetic boom");
+  });
+});
+
+describe("resolveSignalSource — default delegates to process.on/off", () => {
+  it("returns the operator-supplied source unchanged when defined", () => {
+    const fake = new FakeSignalSource();
+    expect(resolveSignalSource(fake)).toBe(fake);
+  });
+
+  it("on/off methods call through to process.on/off when no source is supplied", () => {
+    const onSpy = vi.spyOn(process, "on").mockImplementation(() => process);
+    const offSpy = vi.spyOn(process, "off").mockImplementation(() => process);
+    try {
+      const source = resolveSignalSource(undefined);
+      const handler = (): void => undefined;
+      source.on("SIGUSR2", handler);
+      source.off("SIGUSR2", handler);
+      expect(onSpy).toHaveBeenCalledWith("SIGUSR2", handler);
+      expect(offSpy).toHaveBeenCalledWith("SIGUSR2", handler);
+    } finally {
+      onSpy.mockRestore();
+      offSpy.mockRestore();
+    }
+  });
+});
+
+describe("watchMain — fetchWsToken wiring", () => {
+  it("the captured fetchWsToken closure delegates to the underlying ws_token fetcher", async () => {
+    const { factory, sessions } = createCapturingFactory();
+    const runPromise = watchMain({
+      source: baseEnv(),
+      argv: [],
+      install: false,
+      wsClientFactory: factory,
+      stdout: { write: () => undefined },
+    });
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 5);
+      if (typeof timer.unref === "function") timer.unref();
+    });
+    const session = sessions[0];
+    expect(session).toBeDefined();
+    const fetchSpy = vi.fn().mockResolvedValue({
+      access: "fresh",
+      refresh: "fresh-refresh",
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    try {
+      await session?.options
+        .fetchWsToken()
+        .catch(() => undefined);
+      expect(fetchSpy).toHaveBeenCalled();
+      const callArgs = fetchSpy.mock.calls[0];
+      const url = String(callArgs?.[0]);
+      expect(url).toContain("/api/auth/refresh");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    session?.resolveRun();
+    await runPromise;
   });
 });
 
