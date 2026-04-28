@@ -16,6 +16,7 @@ import type {
   AiReviewCapsViolationFrameData,
   AiReviewDecisionAckFrameData,
   AiReviewRequestFrameData,
+  FrameEnvelope,
   OrderEventData,
   SignalData,
   WSAuthCompleteResponse,
@@ -90,6 +91,42 @@ export type GenericDataFrame = SignalFrame | OrderEventFrame;
  * variants ahead of the npm bridge update.
  */
 export type ServerFrame = ControlFrame | AiReviewFrame | GenericDataFrame;
+
+/**
+ * Closed union of server-emitted frames the publisher actually
+ * stamps a topic on. Distinct from the broader `ServerFrame` (which
+ * also includes control frames whose `topic` is always null on the
+ * wire). Use the `hasTopic` runtime guard to safely narrow a
+ * `ServerDataFrame` to `PublishedDataFrame` before reading
+ * `frame.topic` as a routing key.
+ */
+export type ServerDataFrame =
+  | AiReviewRequestFrame
+  | AiReviewDecisionAckFrame
+  | AiReviewCapsViolationFrame
+  | SignalFrame
+  | OrderEventFrame;
+
+/**
+ * Narrowed alias asserting `topic` is non-null. Produced from a
+ * `ServerDataFrame` via the `hasTopic` runtime guard; the type
+ * system alone cannot prove non-null because every frame's
+ * envelope declares `topic: string | null`.
+ */
+export type PublishedDataFrame = ServerDataFrame & { readonly topic: string };
+
+/**
+ * Runtime narrowing guard for the topic field. Consumers MUST call
+ * this before using `frame.topic` as a routing key. Returns true
+ * when the publisher has stamped a topic onto the frame; false on
+ * control frames + any data frame still in producer-construction
+ * state where topic has not been populated yet.
+ */
+export function hasTopic<F extends FrameEnvelope>(
+  frame: F,
+): frame is F & { readonly topic: string } {
+  return frame.topic !== null;
+}
 
 /* --------------------------------------------------------------------
  * Bridge-friendly aliases for the client-emitted frames the watch

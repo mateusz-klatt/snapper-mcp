@@ -4,9 +4,12 @@
  * The Snapper backend's WebSocket schemas require every inbound
  * (client → server) frame to carry an envelope of provenance fields
  * alongside the type discriminator and payload-specific fields. The
- * envelope is `{session_id, sequence_id, public_id, timestamp}`,
+ * envelope is `{session_id, sequence_id, public_id, timestamp, topic}`,
  * matching the producer-side conventions Snapper uses across its
- * REST, WebSocket, and pub/sub surfaces.
+ * REST, WebSocket, and pub/sub surfaces. The bridge does not
+ * broadcast on outbound frames, so `topic` is always `null` on the
+ * client → server side; the server stamps `topic` on data frames it
+ * publishes to a routing key.
  *
  * `EnvelopeMinter` keeps a process-stable `session_id` (random UUID
  * per minter instance, or operator-supplied via constructor option)
@@ -30,6 +33,7 @@
  *   3. Stamps `timestamp` as the current UTC instant in ISO 8601
  *      form (millisecond precision; matches the Pydantic backend's
  *      JSON-serialized datetimes).
+ *   4. Sets `topic` to `null` (bridge does not broadcast).
  */
 
 import { randomBytes } from "node:crypto";
@@ -87,6 +91,7 @@ export class EnvelopeMinter {
       sequence_id,
       public_id: uuidv7(),
       timestamp: new Date().toISOString(),
+      topic: null,
     };
   }
 

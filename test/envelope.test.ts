@@ -105,6 +105,22 @@ describe("EnvelopeMinter — timestamp", () => {
   });
 });
 
+describe("EnvelopeMinter — topic field", () => {
+  it("returns topic: null on every minted envelope (bridge does not broadcast)", () => {
+    const minter = new EnvelopeMinter();
+    expect(minter.next().topic).toBeNull();
+    expect(minter.next("control").topic).toBeNull();
+    expect(minter.next("telemetry").topic).toBeNull();
+  });
+
+  it("envelope carries exactly the 5 expected wire-contract fields", () => {
+    const env = new EnvelopeMinter().next();
+    expect(new Set(Object.keys(env))).toEqual(
+      new Set(["session_id", "sequence_id", "public_id", "timestamp", "topic"]),
+    );
+  });
+});
+
 describe("uuidv7 — RFC 9562 invariants", () => {
   it("encodes the current millisecond timestamp into the first 48 bits (sortable across mints)", () => {
     const before = Date.now();
@@ -139,10 +155,10 @@ describe("uuidv7 — RFC 9562 invariants", () => {
 });
 
 describe("FrameEnvelope shape", () => {
-  it("returned envelope has exactly the four expected fields", () => {
+  it("returned envelope has exactly the five expected fields including topic", () => {
     const env = new EnvelopeMinter().next();
     const keys = Object.keys(env).sort((a, b) => a.localeCompare(b));
-    expect(keys).toEqual(["public_id", "sequence_id", "session_id", "timestamp"]);
+    expect(keys).toEqual(["public_id", "sequence_id", "session_id", "timestamp", "topic"]);
   });
 
   it("FrameEnvelope is structurally assignable from a fresh envelope", () => {

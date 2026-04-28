@@ -10,6 +10,7 @@ export interface FrameEnvelope {
   readonly public_id: string;
   readonly timestamp: string;
   readonly session_id: string;
+  readonly topic: string | null;
 }
 
 

@@ -13,19 +13,22 @@ import type {
   ErrorFrame,
   OrderEventFrame,
   PongFrame,
+  PublishedDataFrame,
   ReauthOkFrame,
   ReauthRequiredFrame,
+  ServerDataFrame,
   ServerFrame,
   SignalFrame,
   SubscriptionSuccessFrame,
 } from "../src/types.js";
-import { dedupKeyOf } from "../src/types.js";
+import { dedupKeyOf, hasTopic } from "../src/types.js";
 
 const ENVELOPE: FrameEnvelope = {
   session_id: "sess-server-1",
   sequence_id: 1,
   public_id: "01933b00-0000-7000-8000-000000000001",
   timestamp: "2026-04-27T10:00:00.000Z",
+  topic: null,
 };
 
 const AI_REQUEST_PAYLOAD_FIELDS = {
@@ -358,6 +361,82 @@ describe("ServerFrame discriminator coverage", () => {
     ];
     for (const frame of frames) {
       expect(dedupKeyOf(frame)).toBeNull();
+    }
+  });
+});
+
+describe("hasTopic — runtime narrowing guard", () => {
+  it("returns true when topic is a non-null string", () => {
+    const stamped: SignalFrame = {
+      ...ENVELOPE,
+      topic: "signals.kraken.BTC-USD.rsi",
+      type: "signal",
+      instrument: "BTC-USD",
+      exchange: "kraken",
+      side: "buy",
+      strength: 1,
+      reason: "rsi crossed 30",
+      price: null,
+      strategy_name: null,
+      fired_at: "2026-04-27T10:00:00Z",
+      wallet_public_id: "wal-1",
+      operator_public_id: null,
+      user_public_id: null,
+    };
+    expect(hasTopic(stamped)).toBe(true);
+  });
+
+  it("returns false when topic is null (control frame on the wire)", () => {
+    const control: AuthRequiredFrame = {
+      ...ENVELOPE,
+      type: "auth_required",
+      timeout: 30,
+    };
+    expect(hasTopic(control)).toBe(false);
+  });
+
+  it("returns false when topic is null (data frame still in producer-construction state)", () => {
+    const unstamped: SignalFrame = {
+      ...ENVELOPE,
+      type: "signal",
+      instrument: "BTC-USD",
+      exchange: "kraken",
+      side: "buy",
+      strength: 1,
+      reason: "rsi crossed 30",
+      price: null,
+      strategy_name: null,
+      fired_at: "2026-04-27T10:00:00Z",
+      wallet_public_id: "wal-1",
+      operator_public_id: null,
+      user_public_id: null,
+    };
+    expect(hasTopic(unstamped)).toBe(false);
+  });
+
+  it("narrows ServerDataFrame.topic from string|null to string at the type level", () => {
+    const stamped: SignalFrame = {
+      ...ENVELOPE,
+      topic: "signals.kraken.BTC-USD.rsi",
+      type: "signal",
+      instrument: "BTC-USD",
+      exchange: "kraken",
+      side: "buy",
+      strength: 1,
+      reason: "rsi crossed 30",
+      price: null,
+      strategy_name: null,
+      fired_at: "2026-04-27T10:00:00Z",
+      wallet_public_id: "wal-1",
+      operator_public_id: null,
+      user_public_id: null,
+    };
+    const data: ServerDataFrame = stamped;
+    if (hasTopic(data)) {
+      const published: PublishedDataFrame = data;
+      expect(published.topic.startsWith("signals.")).toBe(true);
+    } else {
+      expect.fail("hasTopic must narrow stamped frames to PublishedDataFrame");
     }
   });
 });
