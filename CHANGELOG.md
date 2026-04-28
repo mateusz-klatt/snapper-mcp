@@ -36,9 +36,9 @@ section below for the rotation-conflict reasoning.
   a `reauth` frame in the same socket; `auth_expired` cycles the
   connection from scratch.
 - Forward-compatible discriminated dispatch: unknown
-  `frame.type` values are dropped silently with a single warn line
-  so a backend that ships new frame variants ahead of an npm bridge
-  update stays compatible.
+  `frame.type` values are dropped silently (recorded at debug
+  level only) so a backend that ships new frame variants ahead of
+  an npm bridge update stays compatible without spamming stderr.
 - AI-review dedup keyed on `(type, review_public_id)` with LRU
   eviction (default cap 10000) and deadline-based pruning every
   60s. Cache update commits AFTER a successful frame delivery so

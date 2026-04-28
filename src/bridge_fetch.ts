@@ -113,11 +113,11 @@ export function createBridgeFetch(
   return bridgeFetch;
 }
 
-function parseRefreshBody(raw: unknown): TokenPair {
+function parseRefreshBody(raw: unknown, status: number): TokenPair {
   if (raw === null || typeof raw !== "object") {
     throw new RefreshFailedError(
       "refresh response malformed: body is not a JSON object",
-      200,
+      status,
       raw,
     );
   }
@@ -127,13 +127,13 @@ function parseRefreshBody(raw: unknown): TokenPair {
   if (typeof access !== "string" || access.length === 0) {
     throw new RefreshFailedError(
       "refresh response malformed: payload.access_token missing or empty",
-      200,
+      status,
     );
   }
   if (typeof refresh !== "string" || refresh.length === 0) {
     throw new RefreshFailedError(
       "refresh response malformed: payload.refresh_token missing or empty",
-      200,
+      status,
     );
   }
   return { access, refresh };
@@ -181,9 +181,9 @@ export function makePerformRefresh(baseUrl: URL, logger: Logger): RefreshFn {
     try {
       body = await response.json();
     } catch (err) {
-      throw new RefreshFailedError("refresh response malformed: not JSON", 200, err);
+      throw new RefreshFailedError("refresh response malformed: not JSON", response.status, err);
     }
-    const pair = parseRefreshBody(body);
+    const pair = parseRefreshBody(body, response.status);
     logger.debug("refresh succeeded; new token pair installed");
     return pair;
   };

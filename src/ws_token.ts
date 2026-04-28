@@ -83,14 +83,17 @@ type CapturedWsFields =
   | { readonly ok: true; readonly ws_token: string; readonly ws_token_exp: string }
   | { readonly ok: false; readonly error: RefreshFailedError };
 
-function parseTokenPair(raw: unknown): {
+function parseTokenPair(
+  raw: unknown,
+  status: number,
+): {
   readonly pair: TokenPair;
   readonly envelope: RefreshPayloadEnvelope;
 } {
   if (raw === null || typeof raw !== "object") {
     throw new RefreshFailedError(
       "refresh response malformed: body is not a JSON object",
-      200,
+      status,
       raw,
     );
   }
@@ -100,26 +103,29 @@ function parseTokenPair(raw: unknown): {
   if (typeof access !== "string" || access.length === 0) {
     throw new RefreshFailedError(
       "refresh response malformed: payload.access_token missing or empty",
-      200,
+      status,
     );
   }
   if (typeof refresh !== "string" || refresh.length === 0) {
     throw new RefreshFailedError(
       "refresh response malformed: payload.refresh_token missing or empty",
-      200,
+      status,
     );
   }
   return { pair: { access, refresh }, envelope };
 }
 
-function captureWsFields(envelope: RefreshPayloadEnvelope): CapturedWsFields {
+function captureWsFields(
+  envelope: RefreshPayloadEnvelope,
+  status: number,
+): CapturedWsFields {
   const wsToken = envelope.payload?.ws_token;
   if (typeof wsToken !== "string" || wsToken.length === 0) {
     return {
       ok: false,
       error: new RefreshFailedError(
         "refresh response malformed: payload.ws_token missing or empty",
-        200,
+        status,
       ),
     };
   }
@@ -129,7 +135,7 @@ function captureWsFields(envelope: RefreshPayloadEnvelope): CapturedWsFields {
       ok: false,
       error: new RefreshFailedError(
         "refresh response malformed: payload.ws_token_exp missing or empty",
-        200,
+        status,
       ),
     };
   }
@@ -138,7 +144,7 @@ function captureWsFields(envelope: RefreshPayloadEnvelope): CapturedWsFields {
       ok: false,
       error: new RefreshFailedError(
         `refresh response malformed: payload.ws_token_exp is not a parseable ISO 8601 datetime (got ${JSON.stringify(wsTokenExp)})`,
-        200,
+        status,
       ),
     };
   }
@@ -200,10 +206,10 @@ export async function fetchWsToken(
     try {
       body = await response.json();
     } catch (err) {
-      throw new RefreshFailedError("refresh response malformed: not JSON", 200, err);
+      throw new RefreshFailedError("refresh response malformed: not JSON", response.status, err);
     }
-    const { pair, envelope } = parseTokenPair(body);
-    const captured = captureWsFields(envelope);
+    const { pair, envelope } = parseTokenPair(body, response.status);
+    const captured = captureWsFields(envelope, response.status);
     captureCell.value = captured;
     if (captured.ok) {
       logger.debug("ws_token: refresh succeeded; ws_token captured");
@@ -221,7 +227,7 @@ export async function fetchWsToken(
   if (result === null) {
     throw new RefreshFailedError(
       "ws_token: rotate joined an existing refresh without ws_token capture; retry the watch session",
-      200,
+      0,
     );
   }
   if (!result.ok) {

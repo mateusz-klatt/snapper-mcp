@@ -481,10 +481,17 @@ class SessionRunner {
 
   dispose(): void {
     this.stopHeartbeat();
-    if (!this.closed) {
-      this.socket.close(1000, "client shutdown");
-    }
-    this.socket.terminate();
+    if (this.closed) return;
+    /*
+     * Use `close()` (graceful with code/reason) rather than the
+     * follow-up `terminate()`: terminate aborts the connection
+     * before the close handshake completes, which makes the
+     * server observe an abnormal disconnect rather than the
+     * intentional 1000 / "client shutdown" reason. The socket's
+     * own close-event flow handles teardown after `close()` once
+     * the server acknowledges.
+     */
+    this.socket.close(1000, "client shutdown");
   }
 
   private async waitForOpen(): Promise<void> {
@@ -643,7 +650,13 @@ class SessionRunner {
         return;
       case "signal":
       case "order_event":
-        this.opts.onFrame(frame);
+        try {
+          this.opts.onFrame(frame);
+        } catch (err) {
+          this.logger.warn(
+            `watch: onFrame threw on ${frame.type} delivery: ${formatError(err)}`,
+          );
+        }
         return;
       case "ai_review.request":
       case "ai_review.decision_ack":

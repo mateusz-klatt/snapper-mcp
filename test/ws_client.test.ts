@@ -180,6 +180,53 @@ describe("ws_client — happy path lifecycle", () => {
     await runPromise;
   });
 
+  it("does not propagate exceptions from onFrame on signal/order_event delivery", async () => {
+    const server = await startServer([happyPathScript()]);
+    const onFrame = vi.fn<(frame: ServerFrame) => void>().mockImplementation((frame) => {
+      if (frame.type === "signal") {
+        throw new Error("downstream EPIPE");
+      }
+    });
+    const client = createWsClient(makeOptions(server, { onFrame }));
+    const runPromise = client.run();
+    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"));
+    server.emit(0, {
+      type: "signal",
+      instrument: "BTC-USD",
+      exchange: "kraken",
+      side: "buy",
+      strength: 0.5,
+      reason: "test",
+      price: 100,
+      strategy_name: null,
+      fired_at: "2026-04-28T12:00:00.000Z",
+      wallet_public_id: "0192f000-0000-7000-8000-bbbbbbbbbbbb",
+      operator_public_id: null,
+      user_public_id: null,
+      ...envelopeStub({ topic: "signals.kraken.BTC-USD.rsi" }),
+    });
+    server.emit(0, {
+      type: "order_event",
+      exchange_order_id: "ex-1",
+      client_order_id: "cli-1",
+      exchange: "paper",
+      instrument: "BTC-USD",
+      event: "submitted",
+      reason: null,
+      wallet_public_id: "0192f000-0000-7000-8000-cccccccccccc",
+      operator_public_id: null,
+      user_public_id: null,
+      ...envelopeStub({ topic: "orders.events.paper.BTC-USD" }),
+    });
+    await waitFor(() =>
+      onFrame.mock.calls.some((c) => (c[0] as { type: string }).type === "order_event"),
+    );
+    expect(onFrame).toHaveBeenCalledTimes(2);
+    server.closeConnection(0);
+    await client.close();
+    await runPromise;
+  });
+
   it("forwards data frames (signal, order_event) but NOT control frames (pong, error, subscription_success) to onFrame", async () => {
     const server = await startServer([happyPathScript()]);
     const onFrame = vi.fn<(frame: ServerFrame) => void>();
