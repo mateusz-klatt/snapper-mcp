@@ -1,7 +1,7 @@
 {
   "name": "@mateusz-klatt/snapper-mcp",
-  "version": "0.2.2",
-  "description": "Lightweight stdio-to-HTTP MCP bridge from Claude Desktop / Claude Code to Snapper /api/mcp.",
+  "version": "0.3.0",
+  "description": "Lightweight stdio-to-HTTP MCP bridge from Claude Desktop / Claude Code to Snapper /api/mcp, with an optional `watch` subcommand that streams live signal + order events as JSONL for Claude Code monitor primitives.",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
@@ -55,11 +55,13 @@
     "dev": "tsup --watch"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0"
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "ws": "^8.20.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/node": "^25",
+    "@types/ws": "^8.18.1",
     "@typescript-eslint/eslint-plugin": "^8",
     "@typescript-eslint/parser": "^8",
     "@vitest/coverage-v8": "^4.1.5",

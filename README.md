@@ -233,6 +233,81 @@ subprocess stderr tail.
 3. Closes the HTTP transport, then the stdio server.
 4. Exits 0 on clean drain, 1 if any phase hit the timeout.
 
+In the `watch` subcommand the same signals trigger a `WebSocket.close`
+on the active session; any in-flight reconnect-backoff sleep is
+cancelled immediately rather than blocking shutdown for its full
+duration.
+
+## Push wakeup (`watch` subcommand)
+
+In addition to the proxy mode used by Claude Desktop / Claude Code as
+an MCP server, the bridge ships a second mode that streams live
+backend events to stdout as JSONL frames:
+
+```sh
+snapper-mcp watch [--topic PREFIX]...
+```
+
+Each `--topic` argument is repeatable. Every PREFIX must end with `.`
+(it addresses a topic family root). The default subscription is the
+union of `signals.` and `orders.events.` — the two production roots
+that matter most for an AI delegate's situational awareness:
+
+```sh
+# Default: subscribe to live signals + order lifecycle events.
+snapper-mcp watch
+
+# Or restrict to a single family:
+snapper-mcp watch --topic signals.
+```
+
+Stdout is the JSONL channel — each frame is one line of valid JSON
+ending in `\n`, in receive order. Stderr is the bridge's logger
+channel (same `SNAPPER_MCP_LOG_LEVEL` knob applies). The watch session
+authenticates with the same `SNAPPER_ACCESS_TOKEN` / `SNAPPER_REFRESH_TOKEN`
+the proxy mode uses; the bridge mints a one-shot `ws_token` over the
+existing refresh-token flow so no separate WS-token endpoint is needed.
+
+Reconnection is automatic: any unintended close schedules a reconnect
+with jittered exponential backoff (base 1 s, max 30 s, ±25 %). The
+backoff resets on the first successful subscription of the next
+session. Server-side `reauth_required` warnings trigger an in-place
+ws_token refresh; `auth_expired` cycles the connection from scratch.
+
+`SNAPPER_REFRESH_TOKEN` is REQUIRED for the watch subcommand — long-lived
+PAT delegates cannot mint a `ws_token`, so the watch mode exits 1 with
+an actionable stderr message in that configuration. Use a rotating
+delegate for push-wakeup flows.
+
+Only DATA frames (signals, order events, AI-review variants) are
+written to stdout. Control frames (subscription confirmations, pong,
+server `error` notices, auth + reauth events) are logged to stderr
+only — the JSONL stream consumed by a Claude Code monitor primitive
+stays free of protocol noise.
+
+### Why isn't there a plugin monitor entry?
+
+The plugin manifest in this release does NOT auto-wire the watch
+subcommand as a Claude Code monitor. The reason is intentional and
+worth understanding before you wire one up at the host layer:
+
+The bridge mints its one-shot `ws_token` over the existing
+`/api/auth/refresh` rotation flow, and refresh rotation is atomic on
+the backend — calling refresh always revokes the previous JTI and
+returns a fresh pair. If the plugin ran a monitor process beside the
+proxy MCP server using the same `SNAPPER_REFRESH_TOKEN`, the first
+rotation by either process would silently revoke the other's refresh
+token. Within ~15 minutes the loser's access token would expire, and
+its next refresh attempt would 401 against the now-revoked pair.
+
+If you want plugin-monitor-style push wakeup today, mint a SECOND
+rotating delegate in the Snapper UI dedicated to the watch process,
+and add a monitor entry at the host layer that uses that delegate's
+credentials independently of the proxy bridge's. A future release
+will integrate plugin monitors once the backend exposes a
+non-rotating ws_token endpoint or the bridge gains a separate
+watch-only credential pair.
+
 ## Privacy & telemetry
 
 **Zero telemetry.** The bridge talks exclusively between the MCP host

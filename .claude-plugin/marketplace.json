@@ -5,15 +5,15 @@
     "url": "https://github.com/mateusz-klatt"
   },
   "metadata": {
-    "description": "Claude Code <-> Snapper MCP bridge - trade via natural language.",
-    "version": "0.2.2"
+    "description": "Claude Code <-> Snapper MCP bridge - trade via natural language. Ships a `watch` subcommand for streaming live signal + order events as JSONL.",
+    "version": "0.3.0"
   },
   "plugins": [
     {
       "name": "snapper-mcp",
       "source": "./",
-      "version": "0.2.2",
-      "description": "Connects Claude Code / Claude Desktop to a Snapper trading backend via the /api/mcp endpoint.",
+      "version": "0.3.0",
+      "description": "Connects Claude Code / Claude Desktop to a Snapper trading backend via the /api/mcp endpoint. Ships a `watch` subcommand that streams live signal + order events as JSONL, ready for manual host-level monitor wiring with a separate delegate's credentials.",
       "author": {
         "name": "Mateusz Klatt",
         "url": "https://github.com/mateusz-klatt"

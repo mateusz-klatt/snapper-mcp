@@ -1,6 +1,11 @@
 import { describe, it, expect } from "vitest";
 
-import { EnvValidationError, computeRefreshUrl, parseEnv } from "../src/env.js";
+import {
+  EnvValidationError,
+  computeRefreshUrl,
+  computeWsUrl,
+  parseEnv,
+} from "../src/env.js";
 
 function baseEnv(overrides: Partial<Record<string, string | undefined>> = {}): NodeJS.ProcessEnv {
   return {
@@ -133,5 +138,80 @@ describe("computeRefreshUrl", () => {
   it("always sets return_tokens=true — backend returns null tokens without it", () => {
     const refresh = computeRefreshUrl(new URL("http://localhost:8000/api/mcp"));
     expect(refresh.search).toContain("return_tokens=true");
+  });
+});
+
+describe("computeWsUrl", () => {
+  it("derives ws://{host}/api/ws from an http /api/mcp base URL", () => {
+    const ws = computeWsUrl(new URL("http://localhost:8000/api/mcp"));
+    expect(ws.protocol).toBe("ws:");
+    expect(ws.host).toBe("localhost:8000");
+    expect(ws.pathname).toBe("/api/ws");
+    expect(ws.search).toBe("");
+    expect(ws.toString()).toBe("ws://localhost:8000/api/ws");
+  });
+
+  it("derives wss://{host}/api/ws from an https base URL", () => {
+    const ws = computeWsUrl(new URL("https://snapper.example.com/api/mcp"));
+    expect(ws.protocol).toBe("wss:");
+    expect(ws.host).toBe("snapper.example.com");
+    expect(ws.toString()).toBe("wss://snapper.example.com/api/ws");
+  });
+
+  it("preserves a non-default port in the ws host", () => {
+    const ws = computeWsUrl(new URL("https://snapper.example.com:8443/api/mcp"));
+    expect(ws.host).toBe("snapper.example.com:8443");
+    expect(ws.toString()).toBe("wss://snapper.example.com:8443/api/ws");
+  });
+
+  it("normalises a trailing slash on /api/mcp/ before deriving the WS path", () => {
+    const ws = computeWsUrl(new URL("http://localhost:8000/api/mcp/"));
+    expect(ws.toString()).toBe("ws://localhost:8000/api/ws");
+  });
+
+  it("strips any query string + hash before deriving the WS URL", () => {
+    const base = new URL("https://snapper.example.com/api/mcp?foo=bar#frag");
+    const ws = computeWsUrl(base);
+    expect(ws.search).toBe("");
+    expect(ws.hash).toBe("");
+    expect(ws.toString()).toBe("wss://snapper.example.com/api/ws");
+  });
+
+  it("rejects a base URL whose pathname is not /api/mcp", () => {
+    try {
+      computeWsUrl(new URL("https://snapper.example.com/api/different"));
+      throw new Error("should have thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(EnvValidationError);
+      if (error instanceof EnvValidationError) {
+        expect(error.variable).toBe("SNAPPER_BASE_URL");
+        expect(error.message).toContain("/api/mcp");
+        expect(error.message).toContain("/api/different");
+      }
+    }
+  });
+
+  it("rejects an empty pathname (operator pointed bridge at the bare origin)", () => {
+    try {
+      computeWsUrl(new URL("https://snapper.example.com/"));
+      throw new Error("should have thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(EnvValidationError);
+      if (error instanceof EnvValidationError) {
+        expect(error.variable).toBe("SNAPPER_BASE_URL");
+      }
+    }
+  });
+
+  it("rejects a non-http(s) scheme such as ws:// or file://", () => {
+    try {
+      computeWsUrl(new URL("ws://localhost:8000/api/mcp"));
+      throw new Error("should have thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(EnvValidationError);
+      if (error instanceof EnvValidationError) {
+        expect(error.message).toMatch(/http:\/\/ or https:\/\//);
+      }
+    }
   });
 });
