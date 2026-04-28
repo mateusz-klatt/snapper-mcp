@@ -4,8 +4,12 @@
  * Owns the full lifecycle of a long-lived WebSocket session against
  * the Snapper backend's `/api/ws` endpoint:
  *
- *   1. Mint a one-shot ws_token via the existing refresh flow
- *      (`fetchWsToken`).
+ *   1. Mint a one-shot ws_token via the dedicated
+ *      `POST /api/auth/ws_token` endpoint (`fetchWsToken`). The
+ *      route authenticates with the access bearer and does NOT
+ *      rotate the refresh-token pair, so the watch session does
+ *      not contend with a sibling MCP server on a shared refresh
+ *      JTI.
  *   2. Open the socket with `Authorization: Bearer <access_token>`
  *      on the upgrade request — the backend prefers the bearer
  *      header over the cookie fallback for header-only clients
@@ -34,10 +38,11 @@
  *
  * Reauthentication paths:
  *
- *   - `reauth_required` (warn): mint a fresh ws_token (rotates the
- *     token pair as a side-effect) and send a `reauth` frame in the
- *     same socket; await `reauth_ok`. The streaming loop continues
- *     uninterrupted.
+ *   - `reauth_required` (warn): mint a fresh ws_token via
+ *     `POST /api/auth/ws_token` (the access bearer remains
+ *     unchanged; only the one-shot ws_token is renewed) and send
+ *     a `reauth` frame in the same socket; await `reauth_ok`. The
+ *     streaming loop continues uninterrupted.
  *   - `auth_expired` (server emits 0.3s before close 4401): close
  *     the socket and reconnect from scratch — the previous session's
  *     credentials are dead by the time we see this frame.
@@ -54,14 +59,17 @@
  *   closes (e.g. ws_token replay) MUST not be treated as a healthy
  *   reconnect.
  *
- * PAT-mode incompatibility:
+ * Credential compatibility:
  *
- *   `fetchWsToken` rejects with `NoRefreshTokenError` when no
- *   refresh token is configured (long-lived PAT). This is fatal for
- *   the watch subcommand: PAT delegates cannot mint a ws_token, so
- *   the watch session can never authenticate. The error surfaces to
- *   the caller and the watch entry point exits with a clear
- *   operator-facing stderr message.
+ *   `fetchWsToken` uses the access bearer with no refresh
+ *   rotation, so PAT-style delegates configured without a refresh
+ *   token mint ws_tokens identically to rotating delegates. PAT
+ *   delegates are recommended for production push-wakeup flows
+ *   because their access tokens are long-lived; rotating delegates'
+ *   access tokens expire after the configured TTL window (15min
+ *   by default), at which point the watch session will fail on
+ *   its next ws_token mint until the operator restarts the bridge
+ *   with a fresh access bearer.
  *
  * AI-review dedup:
  *
@@ -99,7 +107,6 @@ import { Buffer } from "node:buffer";
 import WebSocket from "ws";
 
 import { EnvelopeMinter } from "./envelope.js";
-import { NoRefreshTokenError } from "./errors.js";
 import type { Logger } from "./logger.js";
 import type { TokenStore } from "./token_store.js";
 import type {
@@ -334,12 +341,6 @@ export function createWsClient(opts: WsClientOptions): WsClient {
         try {
           await runOneSession();
         } catch (err) {
-          if (err instanceof NoRefreshTokenError) {
-            opts.logger.error(
-              "watch: this delegate is configured without a refresh token; long-lived PATs cannot mint ws_token. Re-issue the delegate as rotating-token.",
-            );
-            throw err;
-          }
           if (shutdownRequested) {
             opts.logger.debug(`watch: session ended during shutdown: ${formatError(err)}`);
             break;
@@ -573,6 +574,30 @@ class SessionRunner {
 
   private sendClientFrame(frame: object): void {
     if (this.closed) return;
+    /*
+     * Skip when the socket is in CLOSING — a heartbeat tick that
+     * races a server-initiated close lands here. `ws@8` does not
+     * throw synchronously on `send()` against a CLOSING socket,
+     * so without the guard the frame would be silently dropped;
+     * the explicit skip + debug log makes the race observable.
+     *
+     * CLOSED is already covered by `this.closed` (the `close`
+     * event handler flips that flag synchronously when the socket
+     * transitions to CLOSED), so we only need to test CLOSING here.
+     *
+     * CONNECTING is intentionally NOT swallowed. The session
+     * runner only dispatches client frames after the auth
+     * handshake has reached the post-connect handlers, so a
+     * CONNECTING-state send signals a programming error: the
+     * runner is sending before the socket finished opening. The
+     * underlying `ws@8` `send()` throws synchronously in that
+     * state, and we want that throw to propagate to the caller's
+     * session loop so the bug surfaces instead of being masked.
+     */
+    if (this.socket.readyState === this.socket.CLOSING) {
+      this.logger.debug("watch: sendClientFrame skipped (socket CLOSING)");
+      return;
+    }
     this.socket.send(JSON.stringify(frame));
   }
 

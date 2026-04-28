@@ -264,9 +264,14 @@ snapper-mcp watch --topic signals.
 Stdout is the JSONL channel — each frame is one line of valid JSON
 ending in `\n`, in receive order. Stderr is the bridge's logger
 channel (same `SNAPPER_MCP_LOG_LEVEL` knob applies). The watch session
-authenticates with the same `SNAPPER_ACCESS_TOKEN` / `SNAPPER_REFRESH_TOKEN`
-the proxy mode uses; the bridge mints a one-shot `ws_token` over the
-existing refresh-token flow so no separate WS-token endpoint is needed.
+authenticates with the same `SNAPPER_ACCESS_TOKEN` /
+`SNAPPER_REFRESH_TOKEN` the proxy mode uses; the bridge mints a
+one-shot `ws_token` via `POST /api/auth/ws_token` (this route must
+exist on the configured Snapper backend — older deployments without
+it should pin the bridge to `@mateusz-klatt/snapper-mcp@0.3.0`).
+The route does NOT rotate the refresh-token pair, so the watch
+process and the proxy MCP server can share a single delegate's
+credentials without colliding on the refresh JTI.
 
 Reconnection is automatic: any unintended close schedules a reconnect
 with jittered exponential backoff (base 1 s, max 30 s, ±25 %). The
@@ -274,10 +279,20 @@ backoff resets on the first successful subscription of the next
 session. Server-side `reauth_required` warnings trigger an in-place
 ws_token refresh; `auth_expired` cycles the connection from scratch.
 
-`SNAPPER_REFRESH_TOKEN` is REQUIRED for the watch subcommand — long-lived
-PAT delegates cannot mint a `ws_token`, so the watch mode exits 1 with
-an actionable stderr message in that configuration. Use a rotating
-delegate for push-wakeup flows.
+**Long-running watch sessions should use a long-lived PAT-style
+delegate** (mint via the Snapper UI with `long_lived=true`). The
+watch subcommand mints ws_tokens via the access bearer and does
+NOT rotate the refresh-token pair, so a rotating-token delegate's
+access token will expire after the configured `auth_access_token_expire_minutes`
+window (15 minutes by default) and the watch session will start
+failing on its next ws_token mint. PAT delegates issue a
+~10-year access token with no refresh credential, which keeps
+the watch session running indefinitely.
+
+Watch sessions configured against a rotating delegate still work
+for short interactive runs and tests, but production push-wakeup
+flows should be configured against a PAT delegate to avoid the
+access-expiry death.
 
 Only DATA frames (signals, order events, AI-review variants) are
 written to stdout. Control frames (subscription confirmations, pong,
@@ -291,22 +306,26 @@ The plugin manifest in this release does NOT auto-wire the watch
 subcommand as a Claude Code monitor. The reason is intentional and
 worth understanding before you wire one up at the host layer:
 
-The bridge mints its one-shot `ws_token` over the existing
-`/api/auth/refresh` rotation flow, and refresh rotation is atomic on
-the backend — calling refresh always revokes the previous JTI and
-returns a fresh pair. If the plugin ran a monitor process beside the
-proxy MCP server using the same `SNAPPER_REFRESH_TOKEN`, the first
-rotation by either process would silently revoke the other's refresh
-token. Within ~15 minutes the loser's access token would expire, and
-its next refresh attempt would 401 against the now-revoked pair.
+The dedicated `POST /api/auth/ws_token` endpoint shipped with this
+release closes the refresh-token rotation race between the watch
+process and the proxy MCP server — both can share a single
+delegate's credentials when minting ws_tokens. But a rotating
+delegate's access token expires after ~15 minutes by default; a
+watch process running off a rotating delegate would die at access
+expiry and would not be able to refresh without rotating the
+shared refresh-token pair, re-introducing the original race.
 
-If you want plugin-monitor-style push wakeup today, mint a SECOND
-rotating delegate in the Snapper UI dedicated to the watch process,
-and add a monitor entry at the host layer that uses that delegate's
-credentials independently of the proxy bridge's. A future release
-will integrate plugin monitors once the backend exposes a
-non-rotating ws_token endpoint or the bridge gains a separate
-watch-only credential pair.
+A future release will integrate plugin monitors once the bridge
+gains a separate watch-only PAT credential UX (a long-lived
+access token dedicated to the monitor, distinct from the proxy's
+rotating credential pair).
+
+If you want plugin-monitor-style push wakeup today, mint a
+long-lived PAT delegate in the Snapper UI dedicated to the watch
+process, and add a monitor entry at the host layer that runs
+`snapper-mcp watch` against that delegate's `SNAPPER_ACCESS_TOKEN`.
+PAT delegates do not expire on the same scale and the watch flow
+runs indefinitely against them.
 
 ## Privacy & telemetry
 

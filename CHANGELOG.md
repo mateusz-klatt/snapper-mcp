@@ -11,6 +11,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - (next release TBD)
 
+## [0.4.0]
+
+Runtime release that switches the `watch` subcommand to a dedicated
+non-rotating ws_token-issuance endpoint. PAT-style delegates are now
+first-class for push-wakeup streaming. Plugin-manifest-level monitor
+wiring remains deferred — see the `### Deferred` section below for
+the access-expiry reasoning.
+
+### Changed
+
+- `fetchWsToken` now POSTs to the dedicated
+  `POST /api/auth/ws_token` endpoint with the caller's access bearer
+  rather than piggybacking on `POST /api/auth/refresh`. The new
+  endpoint mints a one-shot `ws_token` without rotating the
+  refresh-token pair, which is what lets a long-lived watch process
+  reuse the same delegate's credentials as the proxy MCP server
+  without colliding on the refresh JTI. Long-lived PAT-style
+  delegates (configured without a `SNAPPER_REFRESH_TOKEN`) are now
+  first-class for the watch subcommand — they mint ws_tokens via
+  their long-lived access bearer indefinitely.
+- `mcpServers.args` re-pinned to `@mateusz-klatt/snapper-mcp@0.4.0`
+  so a fresh `/plugin install` resolves to this runtime.
+
+### Added
+
+- Defensive `typeof` check in the `hasTopic` runtime guard:
+  malformed frames carrying a non-string non-null `topic` (e.g. a
+  numeric value smuggled past type-checking) are now reported as
+  unstamped instead of being narrowed to `PublishedDataFrame`.
+- `SessionRunner.sendClientFrame` now pre-checks
+  `socket.readyState` and skips the send when the socket is in
+  CLOSING or CLOSED — typically a heartbeat tick racing a
+  server-initiated close. The skip logs at debug level instead of
+  pushing into a torn-down socket. CONNECTING-state sends still
+  propagate to `socket.send()` and the underlying `ws@8`
+  synchronous throw — that path is a programming error and the
+  failure must surface to the runner's session loop.
+
+### Removed
+
+- The watch subcommand no longer pre-checks for a configured
+  refresh token before starting. PAT-mode now works identically;
+  the legacy `NoRefreshTokenError` PAT-rejection branch in
+  `runForever` is gone, as is its unit test.
+
+### Deferred
+
+- Plugin-manifest-level monitor wiring (the `monitors` field in
+  `plugin.json` and a matching `monitors/monitors.json`) was
+  considered for this release but intentionally NOT shipped. The
+  dedicated ws_token endpoint resolves the refresh-JTI race
+  between watch and proxy, but a rotating delegate's access token
+  still expires after ~15 minutes by default. A monitor process
+  driven by a rotating delegate would die at access expiry and
+  could not refresh without rotating the shared refresh JTI —
+  re-introducing the original race. A future release will land
+  the monitor wiring once the bridge gains a separate watch-only
+  PAT credential UX (a long-lived access token dedicated to the
+  monitor, distinct from the proxy's rotating credential pair).
+  Operators who want push-wakeup streaming today should mint a
+  long-lived PAT delegate in the Snapper UI and wire
+  `snapper-mcp watch` at the host layer using that delegate's
+  `SNAPPER_ACCESS_TOKEN`.
+
+### Tests
+
+- 277 bridge tests (was 269 in 0.3.0). `test/ws_token.test.ts`
+  fully rewritten (24 cases) covering the new endpoint contract:
+  URL + Bearer access header, token-store immutability, PAT-mode
+  happy path, 401 / 429 / 5xx / 4xx mapping, network + AbortError
+  mapping, payload validation (non-JSON / null body / missing
+  fields / non-ISO `ws_token_exp`).
+
+### Backend dependency
+
+- Requires Snapper backend that exposes
+  `POST /api/auth/ws_token`. Older Snapper deployments without
+  that route should pin to `@mateusz-klatt/snapper-mcp@0.3.0`.
+
 ## [0.3.0]
 
 Runtime release that adds a new `watch` subcommand for push-wakeup

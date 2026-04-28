@@ -4,7 +4,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 
 import { EnvelopeMinter } from "../src/envelope.js";
-import { NoRefreshTokenError } from "../src/errors.js";
 import { createLogger } from "../src/logger.js";
 import { TokenStore } from "../src/token_store.js";
 import type { ServerFrame } from "../src/types.js";
@@ -556,23 +555,6 @@ describe("ws_client — auth_expired triggers reconnect", () => {
     server.closeConnection(1);
     await client.close();
     await runPromise;
-  });
-});
-
-describe("ws_client — PAT mode is fatal", () => {
-  it("does not retry when fetchWsToken throws NoRefreshTokenError", async () => {
-    const server = await startServer([]);
-    const fetchWsToken = vi.fn().mockRejectedValue(new NoRefreshTokenError());
-    const client = createWsClient(
-      makeOptions(server, {
-        fetchWsToken,
-        reconnectBackoffBaseMs: 1,
-        reconnectBackoffMaxMs: 5,
-      }),
-    );
-    await expect(client.run()).rejects.toBeInstanceOf(NoRefreshTokenError);
-    expect(fetchWsToken).toHaveBeenCalledTimes(1);
-    expect(server.connections.length).toBe(0);
   });
 });
 
