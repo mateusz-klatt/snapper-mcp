@@ -11,10 +11,12 @@ import type {
   AuthOkFrame,
   AuthRequiredFrame,
   ErrorFrame,
+  OrderEventFrame,
   PongFrame,
   ReauthOkFrame,
   ReauthRequiredFrame,
   ServerFrame,
+  SignalFrame,
   SubscriptionSuccessFrame,
 } from "../src/types.js";
 import { dedupKeyOf } from "../src/types.js";
@@ -25,6 +27,19 @@ const ENVELOPE: FrameEnvelope = {
   public_id: "01933b00-0000-7000-8000-000000000001",
   timestamp: "2026-04-27T10:00:00.000Z",
 };
+
+const AI_REQUEST_PAYLOAD_FIELDS = {
+  deadline: "2026-04-27T10:05:00.000Z",
+  signal_envelope: {} as Readonly<Record<string, unknown>>,
+  instrument_metadata: {} as Readonly<Record<string, unknown>>,
+} as const;
+
+const AI_DECISION_ACK_PAYLOAD_FIELDS = {
+  responding_delegate_public_id: "delegate-1",
+  new_status: "resolved_approved",
+  resolution_mode: "pick_one_primary",
+  rationale: null,
+} as const;
 
 describe("dedupKeyOf — AI-review frames", () => {
   it("returns the (type, review_public_id, dispatch_version) triple for ai_review.request", () => {
@@ -38,6 +53,7 @@ describe("dedupKeyOf — AI-review frames", () => {
       instrument_public_id: "inst-1",
       dispatch_version: 7,
       selected_delegate_public_id: "delegate-1",
+      ...AI_REQUEST_PAYLOAD_FIELDS,
     };
     expect(dedupKeyOf(frame)).toEqual({
       type: "ai_review.request",
@@ -57,6 +73,7 @@ describe("dedupKeyOf — AI-review frames", () => {
       instrument_public_id: "inst-1",
       dispatch_version: 1,
       decision: "approve",
+      ...AI_DECISION_ACK_PAYLOAD_FIELDS,
     };
     expect(dedupKeyOf(frame)).toEqual({
       type: "ai_review.decision_ack",
@@ -97,6 +114,7 @@ describe("dedupKeyOf — AI-review frames", () => {
       instrument_public_id: "inst-1",
       dispatch_version: 1,
       selected_delegate_public_id: "delegate-1",
+      ...AI_REQUEST_PAYLOAD_FIELDS,
     };
     const b: AiReviewRequestFrame = {
       ...ENVELOPE,
@@ -108,6 +126,7 @@ describe("dedupKeyOf — AI-review frames", () => {
       instrument_public_id: "inst-different",
       dispatch_version: 1,
       selected_delegate_public_id: "delegate-different",
+      ...AI_REQUEST_PAYLOAD_FIELDS,
     };
     expect(dedupKeyOf(a)).toEqual(dedupKeyOf(b));
   });
@@ -123,6 +142,7 @@ describe("dedupKeyOf — AI-review frames", () => {
       instrument_public_id: "inst-1",
       dispatch_version: 1,
       selected_delegate_public_id: "delegate-1",
+      ...AI_REQUEST_PAYLOAD_FIELDS,
     };
     const v2: AiReviewRequestFrame = { ...v1, dispatch_version: 2 };
     expect(dedupKeyOf(v1)).not.toEqual(dedupKeyOf(v2));
@@ -235,6 +255,42 @@ describe("dedupKeyOf — control frames return null", () => {
     };
     expect(dedupKeyOf(frame)).toBeNull();
   });
+
+  it("returns null for signal (generic data frames don't carry the AI-review dedup triple)", () => {
+    const frame: SignalFrame = {
+      ...ENVELOPE,
+      type: "signal",
+      instrument: "BTC-USD",
+      exchange: "kraken",
+      side: "buy",
+      strength: 0.75,
+      reason: "rsi crossed 30",
+      price: null,
+      strategy_name: null,
+      fired_at: "2026-04-27T10:00:00Z",
+      wallet_public_id: "wal-1",
+      operator_public_id: null,
+      user_public_id: null,
+    };
+    expect(dedupKeyOf(frame)).toBeNull();
+  });
+
+  it("returns null for order_event (generic data frames don't carry the AI-review dedup triple)", () => {
+    const frame: OrderEventFrame = {
+      ...ENVELOPE,
+      type: "order_event",
+      exchange_order_id: "exch-1",
+      client_order_id: "cli-1",
+      exchange: "kraken",
+      instrument: "BTC-USD",
+      event: "submitted",
+      reason: null,
+      wallet_public_id: "wal-1",
+      operator_public_id: null,
+      user_public_id: null,
+    };
+    expect(dedupKeyOf(frame)).toBeNull();
+  });
 });
 
 describe("ServerFrame discriminator coverage", () => {
@@ -271,6 +327,34 @@ describe("ServerFrame discriminator coverage", () => {
         active_connections: 0,
       },
       { ...ENVELOPE, type: "error", message: "x" },
+      {
+        ...ENVELOPE,
+        type: "signal",
+        instrument: "BTC-USD",
+        exchange: "kraken",
+        side: "buy",
+        strength: 1,
+        reason: "rsi crossed 30",
+        price: null,
+        strategy_name: null,
+        fired_at: "2026-04-27T10:00:00Z",
+        wallet_public_id: "wal-1",
+        operator_public_id: null,
+        user_public_id: null,
+      },
+      {
+        ...ENVELOPE,
+        type: "order_event",
+        exchange_order_id: "exch-1",
+        client_order_id: "cli-1",
+        exchange: "kraken",
+        instrument: "BTC-USD",
+        event: "submitted",
+        reason: null,
+        wallet_public_id: "wal-1",
+        operator_public_id: null,
+        user_public_id: null,
+      },
     ];
     for (const frame of frames) {
       expect(dedupKeyOf(frame)).toBeNull();

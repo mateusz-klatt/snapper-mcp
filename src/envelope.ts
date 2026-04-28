@@ -34,6 +34,8 @@
 
 import { randomBytes } from "node:crypto";
 
+import type { FrameEnvelope } from "./generated/wire-contract.js";
+
 /**
  * Generate an RFC 9562 UUID v7. The first 48 bits are the current
  * Unix epoch in milliseconds (big-endian), giving naturally
@@ -52,12 +54,7 @@ export function uuidv7(): string {
   return `${tsHex.slice(0, 8)}-${tsHex.slice(8, 12)}-${seg3}-${seg4}-${seg5}`;
 }
 
-export interface FrameEnvelope {
-  readonly session_id: string;
-  readonly sequence_id: number;
-  readonly public_id: string;
-  readonly timestamp: string;
-}
+export type { FrameEnvelope } from "./generated/wire-contract.js";
 
 export type EnvelopeCounter = "control" | "telemetry";
 
