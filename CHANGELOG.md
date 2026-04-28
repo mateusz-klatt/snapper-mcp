@@ -11,6 +11,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - (next release TBD)
 
+## [0.5.0]
+
+Plugin-surface release that restores the deferred plugin monitor
+entry. A new `SNAPPER_WATCH_ACCESS_TOKEN` user_config field carries a
+long-lived watch-only PAT delegate, delivered to the monitor process
+through Claude Code's documented per-plugin env-export mechanism
+(every user_config value is auto-exported to plugin subprocesses as
+`CLAUDE_PLUGIN_OPTION_<KEY>`). The bridge gains a new
+`parseWatchEnv` resolver in watch mode that reads from a precedence
+chain over those env vars; the proxy MCP server's `parseEnv` contract
+is unchanged, and standalone hosts (Claude Desktop manual config,
+direct CLI) keep working through the existing `SNAPPER_*` env-var
+fallback rungs without any operator-side adjustment.
+
+### Added
+
+- `SNAPPER_WATCH_ACCESS_TOKEN` user_config field in `plugin.json`.
+  Optional, sensitive. Operators mint a SECOND long-lived PAT delegate
+  in Snapper's AI Integration UI and paste its access token here;
+  leaving it blank keeps the plugin monitor process idle (graceful
+  exit 0 with one informational stderr line) and does not affect the
+  proxy MCP server.
+- `monitors` entry in `plugin.json` declaring a single `snapper-watch`
+  monitor. The monitor command is the trivial
+  `npx -y @mateusz-klatt/snapper-mcp@0.5.0 watch` — no shell wrapping,
+  no `cross-env` wrapper, no `${user_config.X}` substitution into
+  argv. Claude Code auto-exports every user_config value to the
+  monitor subprocess as `CLAUDE_PLUGIN_OPTION_<KEY>` env vars, and
+  the bridge's new `parseWatchEnv` reads them directly. The watch
+  token never enters any process's argv at any layer.
+- `parseWatchEnv`, `watchAccessToken`, and `isClaudeCodePluginContext`
+  helpers in `src/env.ts`. The watch resolver chain is, in order:
+  `CLAUDE_PLUGIN_OPTION_SNAPPER_WATCH_ACCESS_TOKEN` (plugin context,
+  dedicated watch token) → `SNAPPER_WATCH_ACCESS_TOKEN` (standalone
+  host, dedicated watch token) → `SNAPPER_ACCESS_TOKEN` (standalone
+  fallback). In Claude Code plugin context the third rung is
+  intentionally DECLINED — falling back to the rotating proxy
+  delegate's access token would die at access-expiry inside a
+  long-running monitor and re-introduce the original v0.4.0
+  deferral failure mode. Base URL chain is parallel:
+  `CLAUDE_PLUGIN_OPTION_SNAPPER_BASE_URL` → `SNAPPER_BASE_URL`. The
+  refresh token is forced to `null` regardless of source — watch
+  must run in PAT mode to avoid colliding with the proxy MCP server
+  on the shared refresh-JTI.
+- Plugin-monitor graceful skip in `watchMain`: if the bridge detects
+  it is running inside a Claude Code plugin context (either
+  `CLAUDE_PLUGIN_OPTION_SNAPPER_BASE_URL` — the documented userConfig
+  auto-export — or the defensive `CLAUDE_PLUGIN_ROOT` fallback signal
+  is set; see `isClaudeCodePluginContext`) AND no access-token rung
+  resolves, it writes one informational stderr line and exits 0
+  instead of throwing. Standalone hosts (neither signal present)
+  still hard-fail with the existing `EnvValidationError` exit-1 path
+  so a misconfigured systemd / launchd unit surfaces the cause
+  clearly.
+- New manifest-shape vitest cases in `test/plugin_manifest.test.ts`
+  asserting the monitor command is the simple form: pins exact
+  `@0.5.0`, invokes `snapper-mcp watch`, embeds NO `${user_config.X}`
+  substitutions, and uses no shell-wrapping primitives (`cross-env`,
+  `sh -c`, `cmd /C`, `=` env-prefix syntax).
+- 22 new bridge tests covering the precedence chain (incl. the
+  proxy-fallback decline regression for plugin context), the
+  dual-signal plugin-context detection, the graceful-skip branch
+  (both via `CLAUDE_PLUGIN_OPTION_*` and via `CLAUDE_PLUGIN_ROOT`-
+  alone), and the standalone-context hard-fail invariant.
+
+### Changed
+
+- Watch subcommand entry now calls `parseWatchEnv` instead of the
+  general `parseEnv`. Standalone hosts that set `SNAPPER_BASE_URL` +
+  `SNAPPER_ACCESS_TOKEN` see ZERO behaviour change; the new code
+  path resolves identically through the chain's lower rungs.
+- `mcpServers.args` re-pinned to `@mateusz-klatt/snapper-mcp@0.5.0`
+  so a fresh `/plugin install` resolves to this runtime — the
+  monitor command also pins `@0.5.0`.
+- README "Push wakeup" section reorganised: the plugin monitor entry
+  is now described as the first-class production path. The prior
+  `### Why isn't there a plugin monitor entry?` subsection is REPLACED
+  by `### Plugin monitor entry (since v0.5.0)` describing the
+  `SNAPPER_WATCH_ACCESS_TOKEN` field, the auto-export mechanism, and
+  the watch-only-PAT requirement.
+
+### Notes
+
+- **No argv exposure.** The watch token travels from operator-supplied
+  user_config → OS keychain → Claude Code parent process →
+  `CLAUDE_PLUGIN_OPTION_SNAPPER_WATCH_ACCESS_TOKEN` env var on the
+  monitor subprocess. It is never substituted into a command string,
+  never visible in `ps aux`, never written to disk by the bridge.
+- **Cross-platform.** The auto-export mechanism is Claude Code-native
+  and works identically on Linux, macOS, and Windows. No
+  shell-specific syntax in the manifest, no platform-conditional
+  command strings, no external npm packages beyond the bridge tarball
+  itself.
+- **Backend dependency.** Same as v0.4.0: requires a Snapper backend
+  exposing `POST /api/auth/ws_token`. No new backend requirement.
+
 ## [0.4.0]
 
 Runtime release that switches the `watch` subcommand to a dedicated

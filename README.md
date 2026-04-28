@@ -42,25 +42,34 @@ In any Claude Code session:
 /plugin install snapper-mcp@mateusz-klatt-snapper-mcp
 ```
 
-Claude Code prompts for two required values plus one optional value:
+Claude Code prompts for two required values plus two optional values:
 
 - **Snapper API URL** — your backend's `/api/mcp` endpoint.
 - **Access token** — paste from Snapper's *Settings -> AI Delegates*
-  page (the config-snippet generator).
+  page (the config-snippet generator). Powers the proxy MCP server.
 - **Refresh token** *(optional)* — paste for rotating-token delegates;
   **leave blank** for long-lived PAT delegates.
+- **Watch monitor access token** *(optional, since v0.5.0)* — paste
+  the access token from a SECOND long-lived PAT delegate dedicated to
+  the push-wakeup monitor. Leave blank to keep the monitor idle. See
+  [Plugin monitor entry](#plugin-monitor-entry-since-v050) below for
+  the auto-exported `CLAUDE_PLUGIN_OPTION_*` delivery mechanism and
+  the watch-only-PAT requirement.
 
 Plugin changes installed mid-session need `/reload-plugins` (or a
 Claude Code restart) before the MCP server starts. After reloading,
 `/mcp list` should show the `snapper` server connected.
 
-The plugin manifest threads the three values into the bridge
-subprocess as env vars via `${user_config.KEY}` interpolation. Claude
-Code stores `sensitive: true` values (the access + refresh tokens) in
-the OS keychain when available, falling back to
-`~/.claude/.credentials.json` — they never land in `settings.json` or
-the manifest. The bridge process itself caches nothing on disk;
-credentials die with the subprocess.
+The plugin manifest threads the proxy MCP server's three credentials
+(`SNAPPER_BASE_URL`, `SNAPPER_ACCESS_TOKEN`, `SNAPPER_REFRESH_TOKEN`)
+into the bridge subprocess as env vars via `${user_config.KEY}`
+interpolation; the watch monitor's `SNAPPER_WATCH_ACCESS_TOKEN`
+travels through Claude Code's auto-export mechanism described in
+[Plugin monitor entry](#plugin-monitor-entry-since-v050) below.
+Claude Code stores `sensitive: true` values in the OS keychain when
+available, falling back to `~/.claude/.credentials.json` — they
+never land in `settings.json` or the manifest. The bridge process
+itself caches nothing on disk; credentials die with the subprocess.
 
 ### Option 2 — Claude Desktop manual config
 
@@ -263,15 +272,23 @@ snapper-mcp watch --topic signals.
 
 Stdout is the JSONL channel — each frame is one line of valid JSON
 ending in `\n`, in receive order. Stderr is the bridge's logger
-channel (same `SNAPPER_MCP_LOG_LEVEL` knob applies). The watch session
-authenticates with the same `SNAPPER_ACCESS_TOKEN` /
-`SNAPPER_REFRESH_TOKEN` the proxy mode uses; the bridge mints a
-one-shot `ws_token` via `POST /api/auth/ws_token` (this route must
-exist on the configured Snapper backend — older deployments without
-it should pin the bridge to `@mateusz-klatt/snapper-mcp@0.3.0`).
-The route does NOT rotate the refresh-token pair, so the watch
-process and the proxy MCP server can share a single delegate's
-credentials without colliding on the refresh JTI.
+channel (same `SNAPPER_MCP_LOG_LEVEL` knob applies). The watch
+session resolves an access token through a context-aware precedence
+chain — `CLAUDE_PLUGIN_OPTION_SNAPPER_WATCH_ACCESS_TOKEN` →
+`SNAPPER_WATCH_ACCESS_TOKEN` → `SNAPPER_ACCESS_TOKEN` (this last
+rung fires in standalone-host context only; in Claude Code plugin
+context the bridge declines this rung and exits 0 cleanly via a
+graceful-skip path; see [Standalone host wiring](#standalone-host-wiring-option-2--3)
+and [Plugin monitor entry](#plugin-monitor-entry-since-v050) below).
+The refresh-token pair is intentionally ignored in watch mode
+(PAT-only contract — see *Plugin monitor entry* below for the
+rotation-race rationale). The bridge mints a one-shot `ws_token` via
+`POST /api/auth/ws_token` (this route must exist on the configured
+Snapper backend — older deployments without it should pin the bridge
+to `@mateusz-klatt/snapper-mcp@0.3.0`). The route does NOT rotate
+the refresh-token pair, so the watch process and the proxy MCP
+server can share a single Snapper delegate's credentials without
+colliding on the refresh JTI.
 
 Reconnection is automatic: any unintended close schedules a reconnect
 with jittered exponential backoff (base 1 s, max 30 s, ±25 %). The
@@ -300,32 +317,68 @@ server `error` notices, auth + reauth events) are logged to stderr
 only — the JSONL stream consumed by a Claude Code monitor primitive
 stays free of protocol noise.
 
-### Why isn't there a plugin monitor entry?
+### Plugin monitor entry (since v0.5.0)
 
-The plugin manifest in this release does NOT auto-wire the watch
-subcommand as a Claude Code monitor. The reason is intentional and
-worth understanding before you wire one up at the host layer:
+The plugin manifest auto-wires the watch subcommand as a Claude Code
+plugin monitor. When configured, the monitor process runs for the
+lifetime of each Claude Code session and streams JSONL frames to
+Claude as notifications — the AI delegate sees signal + order events
+the moment they happen, no polling required.
 
-The dedicated `POST /api/auth/ws_token` endpoint shipped with this
-release closes the refresh-token rotation race between the watch
-process and the proxy MCP server — both can share a single
-delegate's credentials when minting ws_tokens. But a rotating
-delegate's access token expires after ~15 minutes by default; a
-watch process running off a rotating delegate would die at access
-expiry and would not be able to refresh without rotating the
-shared refresh-token pair, re-introducing the original race.
+To enable, mint a SECOND long-lived PAT delegate in Snapper's *AI
+Integration* page (separate from the rotating delegate that powers
+the proxy MCP server) and paste its access token into the
+**Watch monitor access token** field at plugin install time. Leaving
+the field blank keeps the monitor process idle — it exits cleanly at
+session start with one informational stderr line, the proxy MCP
+server is unaffected, and you can opt in later by re-running
+`/plugin config snapper-mcp` and filling in the field.
 
-A future release will integrate plugin monitors once the bridge
-gains a separate watch-only PAT credential UX (a long-lived
-access token dedicated to the monitor, distinct from the proxy's
-rotating credential pair).
+The credential travels via Claude Code's documented per-plugin
+env-export mechanism (see the
+[Claude Code plugins reference](https://code.claude.com/docs/en/plugins-reference)
+under *userConfig*): every userConfig value is auto-exported to plugin
+subprocesses as `CLAUDE_PLUGIN_OPTION_<KEY>`. The monitor command in
+the manifest is the trivial
+`npx -y @mateusz-klatt/snapper-mcp@0.5.0 watch` — no `${user_config.X}`
+substitution into argv, no shell wrapping, no `cross-env` indirection.
+The bridge reads `CLAUDE_PLUGIN_OPTION_SNAPPER_WATCH_ACCESS_TOKEN`
+from its own `process.env` directly, so the token never enters any
+process's argv at any layer and stays out of `ps aux`.
 
-If you want plugin-monitor-style push wakeup today, mint a
-long-lived PAT delegate in the Snapper UI dedicated to the watch
-process, and add a monitor entry at the host layer that runs
-`snapper-mcp watch` against that delegate's `SNAPPER_ACCESS_TOKEN`.
-PAT delegates do not expire on the same scale and the watch flow
-runs indefinitely against them.
+The watch monitor MUST be configured against a long-lived PAT
+delegate. A rotating delegate's access token expires after ~15
+minutes by default and the monitor cannot refresh without colliding
+with the proxy MCP server's refresh token — that is why this is a
+SEPARATE userConfig field and not just a reuse of
+`SNAPPER_ACCESS_TOKEN`.
+
+#### Standalone host wiring (Option 2 / 3)
+
+Outside the plugin (Claude Desktop manual config, systemd, launchd,
+direct CLI) the watch subcommand falls through to the standard
+env-var contract: set `SNAPPER_BASE_URL` + `SNAPPER_ACCESS_TOKEN`
+and run `snapper-mcp watch`. Optionally set
+`SNAPPER_WATCH_ACCESS_TOKEN` to use a separate watch-only credential
+without affecting the proxy mode's `SNAPPER_ACCESS_TOKEN`. The bridge
+resolves the access token in this precedence order:
+
+1. `CLAUDE_PLUGIN_OPTION_SNAPPER_WATCH_ACCESS_TOKEN` (Claude Code
+   plugin context, dedicated watch token).
+2. `SNAPPER_WATCH_ACCESS_TOKEN` (standalone host, dedicated watch
+   token).
+3. `SNAPPER_ACCESS_TOKEN` (standalone-only fallback). In Claude Code
+   plugin context this rung is intentionally NOT consulted — falling
+   back to the rotating proxy delegate's access token would die at
+   access-expiry inside a long-running monitor and re-introduce the
+   v0.4.0 deferral failure mode. Plugin context with a blank watch
+   token therefore exits 0 cleanly via the graceful-skip path
+   instead.
+
+The base URL chain is parallel:
+`CLAUDE_PLUGIN_OPTION_SNAPPER_BASE_URL` → `SNAPPER_BASE_URL`. The
+refresh-token pair is hard-pinned to `null` regardless of source —
+watch must run in PAT mode, full stop.
 
 ## Privacy & telemetry
 
