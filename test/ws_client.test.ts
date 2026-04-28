@@ -221,6 +221,7 @@ describe("ws_client — heartbeat", () => {
     const client = createWsClient(makeOptions(server, { heartbeatIntervalMs: 30 }));
     const runPromise = client.run();
     await waitFor(() => server.received.filter((r) => r.parsed.type === "ping").length >= 2, 2_000);
+    expect(server.received.filter((r) => r.parsed.type === "ping").length).toBeGreaterThanOrEqual(2);
     server.closeConnection(0);
     await client.close();
     await runPromise;
@@ -239,6 +240,7 @@ describe("ws_client — failure paths during handshake", () => {
     );
     const runPromise = client.run();
     await waitFor(() => server.connections.length >= 2, 2_000);
+    expect(server.connections.length).toBeGreaterThanOrEqual(2);
     await client.close();
     await runPromise;
   });
@@ -264,6 +266,7 @@ describe("ws_client — failure paths during handshake", () => {
     );
     const runPromise = client.run();
     await server.awaitConnection(1, 3_000);
+    expect(server.connections.length).toBeGreaterThanOrEqual(2);
     server.closeConnection(1);
     await client.close();
     await runPromise;
@@ -338,6 +341,7 @@ describe("ws_client — failure paths during handshake", () => {
     );
     const runPromise = client.run();
     await server.awaitConnection(1, 3_000);
+    expect(server.connections.length).toBeGreaterThanOrEqual(2);
     server.closeConnection(1);
     await client.close();
     await runPromise;
@@ -431,6 +435,7 @@ describe("ws_client — reauth flow", () => {
     );
     const runPromise = client.run();
     await server.awaitConnection(1, 3_000);
+    expect(server.connections.length).toBeGreaterThanOrEqual(2);
     server.closeConnection(1);
     await client.close();
     await runPromise;
@@ -469,6 +474,7 @@ describe("ws_client — reauth flow", () => {
     );
     const runPromise = client.run();
     await server.awaitConnection(1, 3_000);
+    expect(server.connections.length).toBeGreaterThanOrEqual(2);
     server.closeConnection(1);
     await client.close();
     await runPromise;
@@ -499,6 +505,7 @@ describe("ws_client — auth_expired triggers reconnect", () => {
     );
     const runPromise = client.run();
     await server.awaitConnection(1, 3_000);
+    expect(server.connections.length).toBeGreaterThanOrEqual(2);
     server.closeConnection(1);
     await client.close();
     await runPromise;
@@ -577,6 +584,9 @@ describe("ws_client — AI-review dedup + size guards", () => {
         onFrame.mock.calls.filter((c) => (c[0] as { type: string }).type === "ai_review.request")
           .length === 2,
     );
+    expect(
+      onFrame.mock.calls.filter((c) => (c[0] as { type: string }).type === "ai_review.request"),
+    ).toHaveLength(2);
     server.closeConnection(0);
     await client.close();
     await runPromise;
@@ -601,6 +611,7 @@ describe("ws_client — AI-review dedup + size guards", () => {
     await waitFor(
       () => calls.filter((c) => c.type === "ai_review.request").length >= 2,
     );
+    expect(calls.filter((c) => c.type === "ai_review.request").length).toBeGreaterThanOrEqual(2);
     server.closeConnection(0);
     await client.close();
     await runPromise;
@@ -688,6 +699,9 @@ describe("ws_client — AI-review dedup + size guards", () => {
     emitWith("review-c", 1);
     emitWith("review-a", 1);
     await waitFor(() => onFrame.mock.calls.filter((c) => (c[0] as { type: string }).type === "ai_review.request").length >= 4);
+    expect(
+      onFrame.mock.calls.filter((c) => (c[0] as { type: string }).type === "ai_review.request").length,
+    ).toBeGreaterThanOrEqual(4);
     server.closeConnection(0);
     await client.close();
     await runPromise;
@@ -704,6 +718,9 @@ describe("ws_client — AI-review dedup + size guards", () => {
     await waitFor(
       () => onFrame.mock.calls.some((c) => (c[0] as { type: string }).type === "ai_review.request"),
     );
+    expect(
+      onFrame.mock.calls.some((c) => (c[0] as { type: string }).type === "ai_review.request"),
+    ).toBe(true);
     server.closeConnection(0);
     await client.close();
     await runPromise;
@@ -821,6 +838,9 @@ describe("ws_client — periodic dedup pruning", () => {
           ).length === 2,
         2_000,
       );
+      expect(
+        onFrame.mock.calls.filter((c) => (c[0] as { type: string }).type === "ai_review.request"),
+      ).toHaveLength(2);
     } finally {
       server.closeConnection(0);
       await client.close();
@@ -835,6 +855,7 @@ describe("ws_client — close()", () => {
     const client = createWsClient(makeOptions(server));
     await client.close();
     await client.close();
+    expect(server.connections.length).toBe(0);
   });
 
   it("a second concurrent close() awaits the same teardown rather than returning early", async () => {
@@ -901,6 +922,7 @@ describe("ws_client — close()", () => {
     const client = createWsClient(makeOptions(server));
     const runPromise = client.run();
     await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"));
+    expect(server.connections.length).toBe(1);
     await client.close();
     await client.close();
     await runPromise;
@@ -924,6 +946,7 @@ describe("ws_client — runs with all defaults applied", () => {
     });
     const runPromise = client.run();
     await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"));
+    expect(server.received.some((r) => r.parsed.type === "subscribe")).toBe(true);
     server.closeConnection(0);
     await client.close();
     await runPromise;
@@ -966,9 +989,10 @@ describe("ws_client — close-before-open via injected socket", () => {
       });
       return fake;
     };
+    const factorySpy = vi.fn(fakeFactory);
     const client = createWsClient(
       makeOptions(server, {
-        socketFactory: fakeFactory as unknown as WsClientOptions["socketFactory"],
+        socketFactory: factorySpy as unknown as WsClientOptions["socketFactory"],
         reconnectBackoffBaseMs: 1,
         reconnectBackoffMaxMs: 5,
       }),
@@ -978,6 +1002,7 @@ describe("ws_client — close-before-open via injected socket", () => {
       const timer = setTimeout(resolve, 80);
       if (typeof timer.unref === "function") timer.unref();
     });
+    expect(factorySpy.mock.calls.length).toBeGreaterThanOrEqual(1);
     await client.close();
     await runPromise;
   });

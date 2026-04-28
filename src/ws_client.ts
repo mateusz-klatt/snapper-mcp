@@ -168,24 +168,30 @@ interface ResolvedConfig {
   readonly random: () => number;
 }
 
+/**
+ * Attach a no-op rejection handler so an early rejection on a
+ * deferred — one that may be rejected before the awaiter reaches it
+ * — does not surface as an "unhandled promise rejection" warning.
+ * The real awaiter still observes the rejection because every
+ * `.then`/`await` on the same promise creates a fresh continuation.
+ */
+function silenceUnhandledRejection<T>(p: Promise<T>): Promise<T> {
+  void p.catch(() => undefined);
+  return p;
+}
+
 class Deferred<T> {
   readonly promise: Promise<T>;
   resolve!: (value: T) => void;
   reject!: (err: Error) => void;
 
   constructor() {
-    this.promise = new Promise<T>((res, rej) => {
-      this.resolve = res;
-      this.reject = rej;
-    });
-    /*
-     * Attach a no-op catch handler synchronously so an early rejection
-     * (socket close before the awaiter reaches this deferred) does not
-     * surface as an "unhandled promise rejection" warning. The real
-     * awaiter still observes the rejection because every `.then`/
-     * `await` on the same promise creates a fresh continuation.
-     */
-    void this.promise.catch(() => undefined);
+    this.promise = silenceUnhandledRejection(
+      new Promise<T>((res, rej) => {
+        this.resolve = res;
+        this.reject = rej;
+      }),
+    );
   }
 }
 
