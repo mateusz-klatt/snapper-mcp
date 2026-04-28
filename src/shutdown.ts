@@ -49,12 +49,12 @@ export interface ShutdownHandlers {
 }
 
 function raceWithTimeout<T>(promise: Promise<T>, ms: number, onTimeout: () => T): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  let timer!: ReturnType<typeof setTimeout>;
   const timeoutPromise = new Promise<T>((resolve) => {
     timer = setTimeout(() => resolve(onTimeout()), ms);
   });
   return Promise.race([promise, timeoutPromise]).finally(() => {
-    if (timer !== undefined) clearTimeout(timer);
+    clearTimeout(timer);
   });
 }
 

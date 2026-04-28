@@ -77,6 +77,21 @@ describe("createShutdownHandlers — constants + install/uninstall", () => {
     expect(process.listenerCount("SIGTERM")).toBe(before + 1);
     handlers.uninstall();
   });
+
+  it("uninstall() before install is a no-op", () => {
+    const pending = makeEmptyPending();
+    const handlers = createShutdownHandlers({
+      stdioServer: makeCloseableServer(),
+      httpClient: makeCloseableClient(),
+      pending,
+      logger: silentLogger(),
+      setShuttingDown: () => undefined,
+    });
+    const before = process.listenerCount("SIGTERM");
+    handlers.uninstall();
+    handlers.uninstall();
+    expect(process.listenerCount("SIGTERM")).toBe(before);
+  });
 });
 
 describe("createShutdownHandlers — drain semantics", () => {

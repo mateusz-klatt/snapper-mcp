@@ -375,6 +375,71 @@ describe("watchMain — error paths", () => {
     expect(signalSource.handlers.get("SIGINT")?.size ?? 0).toBe(0);
   });
 
+  it("uses process.argv.slice(3) when no argv option is supplied", async () => {
+    const originalArgv = process.argv;
+    process.argv = ["/usr/bin/node", "/usr/local/bin/snapper-mcp", "watch"];
+    try {
+      const { factory, sessions } = createCapturingFactory();
+      const runPromise = watchMain({
+        source: baseEnv(),
+        install: false,
+        wsClientFactory: factory,
+        stdout: { write: () => undefined },
+      });
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 5);
+        if (typeof timer.unref === "function") timer.unref();
+      });
+      expect(sessions[0]?.options.topics).toEqual(["signals.", "orders.events."]);
+      sessions[0]?.resolveRun();
+      await runPromise;
+    } finally {
+      process.argv = originalArgv;
+    }
+  });
+
+  it("install defaults to true when no install option is supplied", async () => {
+    const { factory, sessions } = createCapturingFactory();
+    const signalSource = new FakeSignalSource();
+    const runPromise = watchMain({
+      source: baseEnv(),
+      argv: [],
+      wsClientFactory: factory,
+      signalSource,
+      stdout: { write: () => undefined },
+    });
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 5);
+      if (typeof timer.unref === "function") timer.unref();
+    });
+    expect(signalSource.handlers.get("SIGTERM")?.size).toBe(1);
+    expect(signalSource.handlers.get("SIGINT")?.size).toBe(1);
+    sessions[0]?.resolveRun();
+    await runPromise;
+  });
+
+  it("exits 1 with stringified diagnostic when run() rejects with a non-Error value", async () => {
+    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
+      throw new Error("exit(1)");
+    });
+    stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const { factory, sessions } = createCapturingFactory();
+    const watchPromise = watchMain({
+      source: baseEnv(),
+      argv: [],
+      install: false,
+      wsClientFactory: factory,
+      stdout: { write: () => undefined },
+    });
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 5);
+      if (typeof timer.unref === "function") timer.unref();
+    });
+    sessions[0]?.rejectRun("plain string boom" as unknown as Error);
+    await expect(watchPromise).rejects.toThrow("exit(1)");
+    expect(exitSpy).toHaveBeenCalledWith(1);
+  });
+
   it("re-throws non-EnvValidation errors raised from buildWatchSetup", async () => {
     const factory = (): WsClient => {
       throw new Error("synthetic boom");
