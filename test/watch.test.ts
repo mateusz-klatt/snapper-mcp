@@ -5,6 +5,7 @@ import { TokenStore } from "../src/token_store.js";
 import type { ServerFrame } from "../src/types.js";
 import {
   parseWatchArgs,
+  resolvePackageName,
   resolveSignalSource,
   WatchArgsError,
   watchMain,
@@ -12,6 +13,17 @@ import {
   type WatchOptions,
 } from "../src/watch.js";
 import type { WsClient, WsClientOptions } from "../src/ws_client.js";
+
+describe("resolvePackageName", () => {
+  it("returns the build-time global verbatim when it is a string", () => {
+    expect(resolvePackageName("@scope/watch")).toBe("@scope/watch");
+  });
+
+  it("falls back to the in-source default when the global is undefined or non-string", () => {
+    expect(resolvePackageName(undefined)).toBe("@mateusz-klatt/snapper-mcp");
+    expect(resolvePackageName(42)).toBe("@mateusz-klatt/snapper-mcp");
+  });
+});
 
 describe("parseWatchArgs", () => {
   it("returns the default topic set when no --topic is supplied", () => {

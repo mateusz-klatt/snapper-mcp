@@ -739,8 +739,8 @@ class SessionRunner {
     if (this.dedupCache.has(key)) {
       this.dedupCache.delete(key);
     } else if (this.dedupCache.size >= this.config.dedupCacheCap) {
-      const oldestKey = this.dedupCache.keys().next().value;
-      if (oldestKey !== undefined) this.dedupCache.delete(oldestKey);
+      const oldestKey = this.dedupCache.keys().next().value as string;
+      this.dedupCache.delete(oldestKey);
     }
     this.dedupCache.set(key, {
       dispatchVersion: frame.dispatch_version,
@@ -801,7 +801,7 @@ async function withTimeout<T>(
   ms: number,
   label: string,
 ): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  let timer!: ReturnType<typeof setTimeout>;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => reject(new Error(`watch: timeout waiting for ${label} after ${ms}ms`)), ms);
     timer.unref();
@@ -809,6 +809,6 @@ async function withTimeout<T>(
   try {
     return await Promise.race([promise, timeout]);
   } finally {
-    if (timer !== undefined) clearTimeout(timer);
+    clearTimeout(timer);
   }
 }

@@ -1,8 +1,22 @@
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { main } from "../src/main.js";
+import { main, resolvePackageName, resolvePackageVersion } from "../src/main.js";
 import { makeMockSnapperServer, type MockSnapperServer } from "./helpers/mock_snapper_server.js";
+
+describe("resolvePackageVersion / resolvePackageName", () => {
+  it("returns the build-time global verbatim when it is a string", () => {
+    expect(resolvePackageVersion("0.3.0")).toBe("0.3.0");
+    expect(resolvePackageName("@scope/pkg")).toBe("@scope/pkg");
+  });
+
+  it("falls back to the in-source default when the global is undefined or non-string", () => {
+    expect(resolvePackageVersion(undefined)).toBe("dev");
+    expect(resolvePackageName(undefined)).toBe("@mateusz-klatt/snapper-mcp");
+    expect(resolvePackageVersion(42)).toBe("dev");
+    expect(resolvePackageName({ pkg: "x" })).toBe("@mateusz-klatt/snapper-mcp");
+  });
+});
 
 describe("main — in-process lifecycle", () => {
   let server: MockSnapperServer;

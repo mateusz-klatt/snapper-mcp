@@ -71,9 +71,23 @@ import {
   type WsClientOptions,
 } from "./ws_client.js";
 
-declare const __PKG_NAME__: string | undefined;
+/**
+ * `tsup` injects __PKG_NAME__ into the bundled dist via its
+ * `define` option. In raw-source test runs the global does not
+ * exist, so resolution goes through globalThis to avoid a
+ * ReferenceError.
+ */
+interface BuildTimeGlobals {
+  readonly __PKG_NAME__?: unknown;
+}
 
-const CLIENT_NAME = typeof __PKG_NAME__ === "string" ? __PKG_NAME__ : "@mateusz-klatt/snapper-mcp";
+export function resolvePackageName(global: unknown): string {
+  return typeof global === "string" ? global : "@mateusz-klatt/snapper-mcp";
+}
+
+const CLIENT_NAME = resolvePackageName(
+  (globalThis as BuildTimeGlobals).__PKG_NAME__,
+);
 
 const DEFAULT_TOPICS: readonly string[] = ["signals.", "orders.events."];
 

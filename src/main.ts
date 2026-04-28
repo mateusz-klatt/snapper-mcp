@@ -41,11 +41,28 @@ import { supportedMirroredCapabilities, wireProxy, type ProxyPending } from "./p
 import { createShutdownHandlers } from "./shutdown.js";
 import { TokenStore } from "./token_store.js";
 
-declare const __PKG_VERSION__: string | undefined;
-declare const __PKG_NAME__: string | undefined;
+/**
+ * `tsup` injects __PKG_VERSION__ / __PKG_NAME__ into the bundled
+ * dist via its `define` option. In raw-source test runs the
+ * globals do not exist, so resolution goes through globalThis to
+ * avoid a ReferenceError.
+ */
+interface BuildTimeGlobals {
+  readonly __PKG_VERSION__?: unknown;
+  readonly __PKG_NAME__?: unknown;
+}
 
-const VERSION = typeof __PKG_VERSION__ === "string" ? __PKG_VERSION__ : "dev";
-const CLIENT_NAME = typeof __PKG_NAME__ === "string" ? __PKG_NAME__ : "@mateusz-klatt/snapper-mcp";
+export function resolvePackageVersion(global: unknown): string {
+  return typeof global === "string" ? global : "dev";
+}
+
+export function resolvePackageName(global: unknown): string {
+  return typeof global === "string" ? global : "@mateusz-klatt/snapper-mcp";
+}
+
+const buildGlobals = globalThis as BuildTimeGlobals;
+const VERSION = resolvePackageVersion(buildGlobals.__PKG_VERSION__);
+const CLIENT_NAME = resolvePackageName(buildGlobals.__PKG_NAME__);
 
 export interface MainOptions {
   readonly source?: NodeJS.ProcessEnv;
