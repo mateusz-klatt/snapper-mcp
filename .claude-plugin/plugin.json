@@ -1,7 +1,7 @@
 {
   "name": "snapper-mcp",
-  "version": "0.4.0",
-  "description": "Connects Claude Code / Claude Desktop to a Snapper trading backend via the /api/mcp endpoint. Ships a `watch` subcommand that streams live signal + order events as JSONL, ready for manual host-level monitor wiring with a long-lived PAT delegate.",
+  "version": "0.5.0",
+  "description": "Connects Claude Code / Claude Desktop to a Snapper trading backend via the /api/mcp endpoint. Ships a `watch` subcommand that streams live signal + order events as JSONL, auto-wired as a Claude Code plugin monitor when a watch-only PAT delegate is configured.",
   "author": {
     "name": "Mateusz Klatt",
     "url": "https://github.com/mateusz-klatt"
@@ -37,18 +37,32 @@
       "description": "Long-lived JWT for auto-rotation. Paste for rotating-token delegates. LEAVE BLANK for delegates minted with long_lived=true (single ~10-year access token, no refresh).",
       "required": false,
       "sensitive": true
+    },
+    "SNAPPER_WATCH_ACCESS_TOKEN": {
+      "type": "string",
+      "title": "Watch monitor access token (optional - long-lived PAT only)",
+      "description": "Separate long-lived PAT delegate dedicated to the push-wakeup monitor. Mint a SECOND delegate in Snapper's AI Integration UI with long_lived=true and paste its access token here. Leave blank to disable the plugin monitor entry; the proxy MCP server is unaffected. The watch monitor must use a long-lived PAT because rotating delegates' access tokens expire after ~15 minutes and the monitor cannot refresh without colliding with the proxy MCP server's refresh token.",
+      "required": false,
+      "sensitive": true
     }
   },
   "mcpServers": {
     "snapper": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@mateusz-klatt/snapper-mcp@0.4.0"],
+      "args": ["-y", "@mateusz-klatt/snapper-mcp@0.5.0"],
       "env": {
         "SNAPPER_BASE_URL": "${user_config.SNAPPER_BASE_URL}",
         "SNAPPER_ACCESS_TOKEN": "${user_config.SNAPPER_ACCESS_TOKEN}",
         "SNAPPER_REFRESH_TOKEN": "${user_config.SNAPPER_REFRESH_TOKEN}"
       }
     }
-  }
+  },
+  "monitors": [
+    {
+      "name": "snapper-watch",
+      "command": "npx -y @mateusz-klatt/snapper-mcp@0.5.0 watch",
+      "description": "Live Snapper signal + order events streamed as JSONL"
+    }
+  ]
 }

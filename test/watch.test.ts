@@ -441,6 +441,172 @@ describe("watchMain — error paths", () => {
   });
 });
 
+describe("watchMain — plugin-monitor graceful skip", () => {
+  let exitSpy: ReturnType<typeof vi.spyOn>;
+  let stderrSpy: ReturnType<typeof vi.spyOn>;
+
+  afterEach(() => {
+    exitSpy?.mockRestore();
+    stderrSpy?.mockRestore();
+  });
+
+  it("returns cleanly without spawning a WS client when CLAUDE_PLUGIN_ROOT is set but no access-token rung resolves", async () => {
+    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
+      throw new Error("exit-was-called");
+    });
+    stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const factoryCalls: number[] = [];
+    const factory = (): WsClient => {
+      factoryCalls.push(1);
+      return {
+        run: () => Promise.resolve(),
+        close: () => Promise.resolve(),
+      } as unknown as WsClient;
+    };
+    await watchMain({
+      source: {
+        CLAUDE_PLUGIN_ROOT: "/path/to/plugin",
+        CLAUDE_PLUGIN_OPTION_SNAPPER_BASE_URL: "http://localhost:8000/api/mcp",
+        SNAPPER_MCP_LOG_LEVEL: "error",
+      } as NodeJS.ProcessEnv,
+      argv: [],
+      install: false,
+      wsClientFactory: factory,
+      stdout: { write: () => undefined },
+    });
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(factoryCalls).toEqual([]);
+    const stderrText = stderrSpy.mock.calls
+      .map((c) => (typeof c[0] === "string" ? c[0] : String(c[0])))
+      .join("");
+    expect(stderrText).toMatch(/SNAPPER_WATCH_ACCESS_TOKEN/);
+    expect(stderrText).toMatch(/staying idle/);
+  });
+
+  it("graceful-skip path also fires when plugin context is detected via CLAUDE_PLUGIN_ROOT alone (defensive fallback signal, no CLAUDE_PLUGIN_OPTION_* present)", async () => {
+    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
+      throw new Error("exit-was-called");
+    });
+    stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    let factoryCalls = 0;
+    const factory = (): WsClient => {
+      factoryCalls += 1;
+      return {
+        run: () => Promise.resolve(),
+        close: () => Promise.resolve(),
+      } as unknown as WsClient;
+    };
+    await watchMain({
+      source: {
+        CLAUDE_PLUGIN_ROOT: "/path/to/plugin",
+        SNAPPER_BASE_URL: "http://localhost:8000/api/mcp",
+        SNAPPER_ACCESS_TOKEN: "rotating-proxy-token",
+        SNAPPER_MCP_LOG_LEVEL: "error",
+      } as NodeJS.ProcessEnv,
+      argv: [],
+      install: false,
+      wsClientFactory: factory,
+      stdout: { write: () => undefined },
+    });
+    expect(factoryCalls).toBe(0);
+    expect(exitSpy).not.toHaveBeenCalled();
+    const stderrText = stderrSpy.mock.calls
+      .map((c) => (typeof c[0] === "string" ? c[0] : String(c[0])))
+      .join("");
+    expect(stderrText).toMatch(/staying idle/);
+  });
+
+  it("starts the WS client normally when CLAUDE_PLUGIN_ROOT is set AND a CLAUDE_PLUGIN_OPTION_SNAPPER_WATCH_ACCESS_TOKEN is provided", async () => {
+    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
+      throw new Error("exit-was-called");
+    });
+    stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    let factoryCalls = 0;
+    const factory = (): WsClient => {
+      factoryCalls += 1;
+      return {
+        run: () => Promise.resolve(),
+        close: () => Promise.resolve(),
+      } as unknown as WsClient;
+    };
+    await watchMain({
+      source: {
+        CLAUDE_PLUGIN_ROOT: "/path/to/plugin",
+        CLAUDE_PLUGIN_OPTION_SNAPPER_BASE_URL: "http://localhost:8000/api/mcp",
+        CLAUDE_PLUGIN_OPTION_SNAPPER_WATCH_ACCESS_TOKEN: "watch-pat",
+        SNAPPER_MCP_LOG_LEVEL: "error",
+      } as NodeJS.ProcessEnv,
+      argv: [],
+      install: false,
+      wsClientFactory: factory,
+      stdout: { write: () => undefined },
+    });
+    expect(factoryCalls).toBe(1);
+    expect(exitSpy).not.toHaveBeenCalled();
+  });
+
+  it("regression: stays idle (exit 0) when plugin user_config has SNAPPER_ACCESS_TOKEN populated (rotating proxy delegate) but SNAPPER_WATCH_ACCESS_TOKEN is blank — declines the proxy-token fallback that would die at access-expiry", async () => {
+    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
+      throw new Error("exit-was-called");
+    });
+    stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    let factoryCalls = 0;
+    const factory = (): WsClient => {
+      factoryCalls += 1;
+      return {
+        run: () => Promise.resolve(),
+        close: () => Promise.resolve(),
+      } as unknown as WsClient;
+    };
+    await watchMain({
+      source: {
+        CLAUDE_PLUGIN_OPTION_SNAPPER_BASE_URL: "http://localhost:8000/api/mcp",
+        CLAUDE_PLUGIN_OPTION_SNAPPER_ACCESS_TOKEN: "rotating-proxy-token",
+        CLAUDE_PLUGIN_OPTION_SNAPPER_REFRESH_TOKEN: "rotating-refresh-token",
+        SNAPPER_MCP_LOG_LEVEL: "error",
+      } as NodeJS.ProcessEnv,
+      argv: [],
+      install: false,
+      wsClientFactory: factory,
+      stdout: { write: () => undefined },
+    });
+    expect(factoryCalls).toBe(0);
+    expect(exitSpy).not.toHaveBeenCalled();
+    const stderrText = stderrSpy.mock.calls
+      .map((c) => (typeof c[0] === "string" ? c[0] : String(c[0])))
+      .join("");
+    expect(stderrText).toMatch(/SNAPPER_WATCH_ACCESS_TOKEN/);
+    expect(stderrText).toMatch(/staying idle/);
+  });
+
+  it("hard-fails (exit 1) when CLAUDE_PLUGIN_ROOT is unset and no access-token rung resolves (standalone misconfiguration, not graceful skip)", async () => {
+    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
+      throw new Error("exit-was-called");
+    });
+    stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    await expect(
+      watchMain({
+        source: {
+          SNAPPER_BASE_URL: "http://localhost:8000/api/mcp",
+          SNAPPER_MCP_LOG_LEVEL: "error",
+        } as NodeJS.ProcessEnv,
+        argv: [],
+        install: false,
+        wsClientFactory: () => ({
+          run: () => Promise.resolve(),
+          close: () => Promise.resolve(),
+        }) as unknown as WsClient,
+        stdout: { write: () => undefined },
+      }),
+    ).rejects.toThrow("exit-was-called");
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    const stderrText = stderrSpy.mock.calls
+      .map((c) => (typeof c[0] === "string" ? c[0] : String(c[0])))
+      .join("");
+    expect(stderrText).toMatch(/SNAPPER_ACCESS_TOKEN/);
+  });
+});
+
 describe("resolveSignalSource — default delegates to process.on/off", () => {
   it("returns the operator-supplied source unchanged when defined", () => {
     const fake = new FakeSignalSource();

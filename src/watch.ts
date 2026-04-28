@@ -23,7 +23,11 @@
  * Lifecycle:
  *
  *   1. Parse argv → `parseWatchArgs`.
- *   2. Parse env → `parseEnv` (same contract as the proxy mode).
+ *   2. Parse env → `parseWatchEnv` (watch-mode resolver: precedence
+ *      chain over `CLAUDE_PLUGIN_OPTION_*` then `SNAPPER_*` env vars,
+ *      with `refreshToken` hard-pinned to `null` because watch must
+ *      run in PAT mode to avoid colliding with the proxy MCP server
+ *      on the shared refresh JTI).
  *   3. Construct `TokenStore` + bind a `fetchWsToken` closure that
  *      reads the access bearer from the store. The watch flow does
  *      not rotate the refresh-token pair — `fetchWsToken` calls
@@ -61,7 +65,12 @@
 import type { WritableStream } from "node:stream/web";
 import type { Writable } from "node:stream";
 
-import { computeWsUrl, parseEnv } from "./env.js";
+import {
+  computeWsUrl,
+  isClaudeCodePluginContext,
+  parseWatchEnv,
+  watchAccessToken,
+} from "./env.js";
 import { EnvelopeMinter } from "./envelope.js";
 import { EnvValidationError } from "./errors.js";
 import { createLogger, type Logger } from "./logger.js";
@@ -197,7 +206,7 @@ interface WatchSetup {
 function buildWatchSetup(args: WatchArgs, options: WatchOptions, sink: JsonlSink): WatchSetup {
   const source = options.source ?? process.env;
   const logger = createLogger(`${CLIENT_NAME} watch`, source);
-  const env = parseEnv(source);
+  const env = parseWatchEnv(source);
   const wsUrl = computeWsUrl(env.baseUrl);
   const store = new TokenStore({ access: env.accessToken, refresh: env.refreshToken });
   const minter = new EnvelopeMinter();
@@ -228,6 +237,36 @@ export async function watchMain(options: WatchOptions = {}): Promise<void> {
     return;
   }
   const sink = resolveStdout(options.stdout);
+
+  /*
+   * Plugin-monitor graceful skip.
+   *
+   * Claude Code starts every plugin monitor unconditionally at session
+   * start (no `when` condition exists for "user_config field is set"),
+   * so a plugin user who installs the bridge for the proxy MCP server
+   * but never fills in `SNAPPER_WATCH_ACCESS_TOKEN` would otherwise see
+   * the monitor restart-loop on every session, emitting a "Missing
+   * required environment variable" stderr line each time. Detect that
+   * case explicitly and exit 0 with a single informational stderr line
+   * instead — the proxy MCP server stays unaffected and the operator
+   * can opt in later by setting the field. Standalone hosts (Option 2
+   * / 3 in README) are NOT affected by this branch: neither plugin-
+   * context signal (`CLAUDE_PLUGIN_OPTION_SNAPPER_BASE_URL` /
+   * `CLAUDE_PLUGIN_ROOT`, see `isClaudeCodePluginContext`) is set in
+   * those, so a missing token still throws the hard EnvValidationError
+   * below.
+   */
+  const source = options.source ?? process.env;
+  if (isClaudeCodePluginContext(source) && watchAccessToken(source) === null) {
+    process.stderr.write(
+      `[${CLIENT_NAME} watch] SNAPPER_WATCH_ACCESS_TOKEN is not configured; ` +
+        `plugin monitor staying idle. To enable push-wakeup, mint a long-lived ` +
+        `PAT delegate in Snapper's AI Integration UI and paste its access ` +
+        `token into the "Watch monitor access token" plugin config field, ` +
+        `then restart Claude Code.\n`,
+    );
+    return;
+  }
 
   let setup: WatchSetup;
   try {
