@@ -148,7 +148,15 @@ function resolveStdout(opt: WatchOptions["stdout"]): JsonlSink {
   const encoder = new TextEncoder();
   return {
     write: (line) => {
-      void writer.write(encoder.encode(line));
+      /*
+       * The Web Streams writer rejects on a closed/errored stream;
+       * swallow the rejection so a failing operator-supplied sink
+       * cannot crash the watch loop with an unhandled rejection.
+       * The watch run continues to call `write` for subsequent
+       * frames — those will reject identically, leaving the rest
+       * of the lifecycle (reconnect, heartbeat, shutdown) intact.
+       */
+      void writer.write(encoder.encode(line)).catch(() => undefined);
     },
   };
 }

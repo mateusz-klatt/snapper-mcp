@@ -235,13 +235,18 @@ export function createWsClient(opts: WsClientOptions): WsClient {
   const dedupCache = new Map<string, DedupEntry>();
 
   /*
-   * `shutdownDone` is created eagerly so the reconnect-backoff sleep
+   * `shutdownAc` is created eagerly so the reconnect-backoff sleep
    * can always race against it. If we lazy-allocated it inside
    * `close()`, a `close()` arriving while the runner is mid-backoff
    * would have to wait for the full timer because the sleep would
-   * already be running without the cancel-promise wired up.
+   * already be running without the cancel-signal wired up.
+   *
+   * AbortController (vs a Deferred + `.then(...)` race) gives sleep
+   * a remove-listener path so a long-running session with many
+   * reconnects does not accumulate one pending continuation per
+   * sleep call against a single never-resolving promise.
    */
-  const shutdownDone = new Deferred<void>();
+  const shutdownAc = new AbortController();
   let shutdownRequested = false;
   let runComplete: Deferred<void> | null = null;
   let reconnectAttempt = 0;
@@ -282,17 +287,26 @@ export function createWsClient(opts: WsClientOptions): WsClient {
      * and the prune timer is unref'd by design, so the process would
      * otherwise exit between sessions.
      *
-     * The sleep is also cancellable via `shutdownDone`: a `close()`
-     * during backoff resolves `shutdownDone`, which races the timer
+     * The sleep is also cancellable via `shutdownAc`: a `close()`
+     * during backoff aborts the controller, which races the timer
      * to completion and lets the runner break out of the loop
-     * without waiting for the full backoff.
+     * without waiting for the full backoff. The abort listener is
+     * registered with `once: true` and explicitly removed in the
+     * timer-fire path, so a long-running session with many
+     * reconnects does not accumulate listeners on the controller's
+     * signal.
      */
+    if (shutdownAc.signal.aborted) return;
     await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, ms);
-      void shutdownDone.promise.then(() => {
+      const onAbort = (): void => {
         clearTimeout(timer);
         resolve();
-      });
+      };
+      const timer = setTimeout(() => {
+        shutdownAc.signal.removeEventListener("abort", onAbort);
+        resolve();
+      }, ms);
+      shutdownAc.signal.addEventListener("abort", onAbort, { once: true });
     });
   }
 
@@ -360,24 +374,22 @@ export function createWsClient(opts: WsClientOptions): WsClient {
           (err: unknown) => deferred.reject(err instanceof Error ? err : new Error(String(err))),
         )
         .finally(() => {
-          shutdownDone.resolve();
+          if (!shutdownAc.signal.aborted) shutdownAc.abort();
         });
       return runComplete.promise;
     },
     close: async () => {
       /*
-       * `shutdownDone` is two-purpose: it wakes an in-flight sleep AND
-       * it tells the runForever epilogue that teardown was requested.
-       * The `close(): Promise<void>` contract, however, must resolve
-       * only after teardown is FULLY complete, so every caller —
-       * including any second concurrent `close()` — awaits
-       * `runComplete`, not `shutdownDone`. Resolving an
-       * already-resolved deferred or disposing an already-disposed
-       * session is a no-op.
+       * `shutdownAc` serves the cancel-sleep purpose; the
+       * `close(): Promise<void>` contract resolves only after
+       * teardown is FULLY complete, so every caller — including any
+       * second concurrent `close()` — awaits `runComplete`, not the
+       * abort signal. Aborting an already-aborted controller or
+       * disposing an already-disposed session is a no-op.
        */
       if (!shutdownRequested) {
         shutdownRequested = true;
-        shutdownDone.resolve();
+        shutdownAc.abort();
         if (activeSession !== null) {
           activeSession.dispose();
         }
@@ -624,7 +636,15 @@ class SessionRunner {
         this.handleAiReviewFrame(frame);
         return;
       default:
-        this.logger.warn(
+        /*
+         * Forward-compat contract (see `src/types.ts`): unknown
+         * server-emitted frame types are dropped silently so the
+         * bridge stays compatible with backend deployments that
+         * ship new variants ahead of an npm bridge update. The
+         * drop is recorded at debug level only — a high-volume
+         * new frame type would otherwise spam stderr.
+         */
+        this.logger.debug(
           `watch: dropping unknown frame.type=${JSON.stringify((frame as { type: unknown }).type)}`,
         );
         return;
