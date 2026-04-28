@@ -1,94 +1,145 @@
 /**
  * Wire-contract types for the Snapper WebSocket push surface.
  *
- * These types are the bridge-side source-of-truth for frames that
- * arrive on `wss://.../api/ws` once the upcoming `snapper-mcp watch`
- * subcommand subscribes. Frames are JSON objects discriminated by
- * the `type` field; the bridge `default:` switch arm drops unknown
- * types silently so the bridge stays forward-compatible when the
- * Snapper backend adds new frame variants.
+ * These types are the bridge-side source-of-truth for frames the
+ * upcoming `snapper-mcp watch` subcommand will exchange with the
+ * Snapper backend on `wss://.../api/ws`. Frames are JSON objects
+ * discriminated by the `type` field; the bridge `default:` switch
+ * arm drops unknown server-emitted types silently so the bridge
+ * stays forward-compatible when the backend adds new frame variants.
  *
- * The bridge keeps a narrow local mirror of the frame schemas so it
- * can ship without a build-time dependency on the Snapper frontend's
- * generated TypeScript bundle. The fields modelled here are the
- * subset the watch subcommand cares about; any extra envelope or
- * payload fields the server emits are preserved by the JSON
- * passthrough but not statically typed here.
+ * The bridge keeps a narrow local mirror of the schemas so it can
+ * ship without a build-time dependency on any generated TypeScript
+ * bundle. The fields modelled here are the subset the watch
+ * subcommand cares about; any extra envelope or payload fields the
+ * server emits are preserved by the JSON passthrough but not
+ * statically typed here.
  *
- * Schema highlights:
+ * Schema notes:
  *
- *   - Control frames carry transport-layer routing fields where
- *     applicable (e.g. `reauth_required` includes the `deadline` by
- *     which the client MUST re-authenticate).
+ *   - Every server-emitted frame carries a transport-layer envelope
+ *     (`session_id`, `sequence_id`, `public_id`, `timestamp`); it is
+ *     modelled here via `extends FrameEnvelope` for completeness even
+ *     though the watch subcommand does not currently inspect those
+ *     fields.
+ *   - Every client-sent frame MUST carry the same envelope. The
+ *     `WatchClientFrame` union below covers only the frames the watch
+ *     subcommand sends (authenticate, reauth, subscribe, ping); other
+ *     client frame types (unsubscribe, get_subscriptions) are not
+ *     needed for the watch flow and are deliberately omitted.
  *   - All AI-review data frames carry the dedup triple
  *     (`type`, `review_public_id`, `dispatch_version`) so consumers
  *     can drop server-side replays after reconnects.
- *   - Numeric `dispatch_version` increments monotonically per
- *     review and is the bridge's primary dedup key.
+ *   - Pydantic's `None` fields serialize as JSON `null`, so optional
+ *     server-emitted fields are typed as `T | null` rather than
+ *     `T | undefined`.
+ *   - Generic data frames (signal, order_event) are intentionally
+ *     NOT modelled here. The server forwards raw publisher payloads
+ *     verbatim; their wire shape mirrors the publisher schemas
+ *     directly (flat domain fields, not a `{topic, payload}`
+ *     wrapper). The watch subcommand forwards them as-is via JSON
+ *     passthrough, so a typed model is not required for that flow.
  */
 
-/** Discriminator union for control frames the server emits to the client. */
-export type ControlFrameType =
-  | "subscription_success"
-  | "subscription_error"
-  | "reauth_required"
-  | "auth_expired"
-  | "system.heartbeat"
-  | "error";
+import type { FrameEnvelope } from "./envelope.js";
 
-/** Subscription ACK after the client sends a `{type: "subscribe", topics: [...]}` frame. */
-export interface SubscriptionSuccessFrame {
-  readonly type: "subscription_success";
-  readonly topics: readonly string[];
-  readonly denied_topics?: readonly string[];
+/* --------------------------------------------------------------------
+ * Server → client control frames
+ * ------------------------------------------------------------------ */
+
+/** First server frame post-upgrade: prompts the client to send `authenticate` within `timeout` seconds. */
+export interface AuthRequiredFrame extends FrameEnvelope {
+  readonly type: "auth_required";
+  readonly timeout: number;
 }
 
-/** Server rejected the subscription request. */
-export interface SubscriptionErrorFrame {
-  readonly type: "subscription_error";
-  readonly errors: readonly string[];
+/** Server acknowledges a successful `authenticate` frame; carries the new ws_token expiration. */
+export interface AuthOkFrame extends FrameEnvelope {
+  readonly type: "auth_ok";
+  readonly exp: string;
+}
+
+/** Server completes the authentication handshake; carries the available topic catalogue + role. */
+export interface AuthCompleteFrame extends FrameEnvelope {
+  readonly type: "auth_complete";
+  readonly available_topics: readonly string[];
+  readonly user_role: string;
+  readonly session_expires_at: string | null;
+  readonly ws_token_exp: string;
+}
+
+/** Server rejected the authentication handshake (bad ws_token, timeout, replay, missing cookie). */
+export interface AuthFailedFrame extends FrameEnvelope {
+  readonly type: "auth_failed";
+  readonly reason: string | null;
 }
 
 /**
  * Server signals the client must fetch a fresh `ws_token` and
- * re-`authenticate` before ``deadline``. The client SHOULD respond
+ * send a `reauth` frame before `deadline`. The client SHOULD respond
  * before the deadline; failure to do so triggers `auth_expired` and
  * the WS session is closed.
  */
-export interface ReauthRequiredFrame {
+export interface ReauthRequiredFrame extends FrameEnvelope {
   readonly type: "reauth_required";
   readonly deadline: string;
 }
 
+/** Server acknowledges a successful `reauth` frame; carries the new ws_token expiration. */
+export interface ReauthOkFrame extends FrameEnvelope {
+  readonly type: "reauth_ok";
+  readonly exp: string;
+}
+
 /** Server expired the WS session — client must reconnect from scratch. */
-export interface AuthExpiredFrame {
+export interface AuthExpiredFrame extends FrameEnvelope {
   readonly type: "auth_expired";
 }
 
-/** Server-initiated keep-alive. The client is expected to respond. */
-export interface SystemHeartbeatFrame {
-  readonly type: "system.heartbeat";
-  readonly seq?: number;
-  readonly ts?: string;
+/** Subscription ACK after the client sends a `subscribe` frame. */
+export interface SubscriptionSuccessFrame extends FrameEnvelope {
+  readonly type: "subscription_success";
+  readonly action: "subscribe" | "unsubscribe";
+  readonly status: "subscribed" | "unsubscribed" | "partial" | "denied" | "no_topics";
+  readonly topics: readonly string[];
+  readonly denied_topics: readonly string[];
+  readonly active_subscriptions: readonly string[];
+  readonly message: string | null;
 }
 
-/** Generic transport-layer error frame. */
-export interface ErrorFrame {
+/** Pong response to a client `ping`; carries server timestamp + connection count. */
+export interface PongFrame extends FrameEnvelope {
+  readonly type: "pong";
+  readonly timestamp: string;
+  readonly active_connections: number;
+}
+
+/** Generic transport-layer error frame; the server emits this for protocol-level failures. */
+export interface ErrorFrame extends FrameEnvelope {
   readonly type: "error";
-  readonly error_code?: string;
-  readonly message?: string;
+  readonly message: string;
 }
 
 export type ControlFrame =
-  | SubscriptionSuccessFrame
-  | SubscriptionErrorFrame
+  | AuthRequiredFrame
+  | AuthOkFrame
+  | AuthCompleteFrame
+  | AuthFailedFrame
   | ReauthRequiredFrame
+  | ReauthOkFrame
   | AuthExpiredFrame
-  | SystemHeartbeatFrame
+  | SubscriptionSuccessFrame
+  | PongFrame
   | ErrorFrame;
 
+export type ControlFrameType = ControlFrame["type"];
+
+/* --------------------------------------------------------------------
+ * Server → client AI-review frames
+ * ------------------------------------------------------------------ */
+
 /** AI-review request frame: server publishes when a delegate is asked to review a candidate signal. */
-export interface AiReviewRequestFrame {
+export interface AiReviewRequestFrame extends FrameEnvelope {
   readonly type: "ai_review.request";
   readonly review_public_id: string;
   readonly user_public_id: string;
@@ -103,7 +154,7 @@ export interface AiReviewRequestFrame {
 }
 
 /** AI-review decision ACK: server publishes after a delegate submits an approve/reject decision. */
-export interface AiReviewDecisionAckFrame {
+export interface AiReviewDecisionAckFrame extends FrameEnvelope {
   readonly type: "ai_review.decision_ack";
   readonly review_public_id: string;
   readonly user_public_id: string;
@@ -116,7 +167,7 @@ export interface AiReviewDecisionAckFrame {
 }
 
 /** Caps-violation frame: server publishes when an approved review trips a per-strategy or per-wallet cap. */
-export interface AiReviewCapsViolationFrame {
+export interface AiReviewCapsViolationFrame extends FrameEnvelope {
   readonly type: "ai_review.caps_violation";
   readonly review_public_id: string;
   readonly user_public_id: string;
@@ -135,40 +186,56 @@ export type AiReviewFrame =
   | AiReviewCapsViolationFrame;
 
 /**
- * Strategy-emitted signal frame on `signals.<exchange>.<symbol>.<rule>`
- * topics. Snapper backend publishes via
- * `snapper.messaging.schemas.data.SignalData`.
+ * Closed union of every server-emitted frame the bridge currently
+ * understands. The `default:` arm of any switch on `frame.type` MUST
+ * drop unknown types silently rather than throw — the bridge stays
+ * forward-compatible with backend deployments that ship new frame
+ * variants ahead of the npm bridge update.
  */
-export interface SignalFrame {
-  readonly type: "signal";
-  readonly topic: string;
-  readonly signal_public_id: string;
-  readonly timestamp: string;
-  readonly payload: Record<string, unknown>;
+export type ServerFrame = ControlFrame | AiReviewFrame;
+
+/* --------------------------------------------------------------------
+ * Client → server frames the watch subcommand sends
+ * ------------------------------------------------------------------ */
+
+/** First client frame post-`auth_required`: presents the one-shot ws_token. */
+export interface AuthenticateRequestFrame extends FrameEnvelope {
+  readonly type: "authenticate";
+  readonly ws_token: string;
+}
+
+/** Sent in response to `reauth_required`: presents a freshly-minted ws_token. */
+export interface ReauthRequestFrame extends FrameEnvelope {
+  readonly type: "reauth";
+  readonly ws_token: string;
+}
+
+/** Subscribes to one or more topic prefixes (or exact topic names). */
+export interface SubscribeRequestFrame extends FrameEnvelope {
+  readonly type: "subscribe";
+  readonly topics: readonly string[];
+}
+
+/** Optional liveness probe; the server replies with `pong`. */
+export interface PingRequestFrame extends FrameEnvelope {
+  readonly type: "ping";
 }
 
 /**
- * Order-lifecycle event frame on
- * `orders.events.<exchange>.<symbol>.<event>` topics. The
- * discriminator MUST stay as ``order_event`` (single underscore) to
- * match the Snapper backend's wire contract; using a dotted form
- * like ``order.event`` would silently drop real order events through
- * the bridge's ``default:`` switch arm.
+ * Closed union of client-emitted frames the watch subcommand sends.
+ * Other client frame types (unsubscribe, get_subscriptions) are not
+ * needed for the watch subcommand; they are deliberately omitted to
+ * keep the surface narrow.
  */
-export interface OrderEventFrame {
-  readonly type: "order_event";
-  readonly topic: string;
-  readonly payload: Record<string, unknown>;
-}
+export type WatchClientFrame =
+  | AuthenticateRequestFrame
+  | ReauthRequestFrame
+  | SubscribeRequestFrame
+  | PingRequestFrame;
 
-/**
- * Closed union of every frame the bridge currently understands. The
- * `default:` arm of any switch on `frame.type` MUST drop unknown
- * types silently rather than throw — the bridge stays forward-
- * compatible with Snapper deployments that ship new frame variants
- * ahead of the npm bridge update.
- */
-export type ServerFrame = ControlFrame | AiReviewFrame | SignalFrame | OrderEventFrame;
+/* --------------------------------------------------------------------
+ * Dedup helpers
+ * ------------------------------------------------------------------ */
 
 /**
  * AI-review dedup triple. The bridge keeps an LRU cache keyed on
@@ -186,8 +253,7 @@ export interface DedupKey {
 /**
  * Helper: extract the dedup triple from any AI-review frame.
  * Non-AI frames return ``null`` — they don't participate in the
- * dedup contract (signals + order events have their own
- * `signal_public_id` / `client_order_id` keys).
+ * dedup contract.
  */
 export function dedupKeyOf(frame: ServerFrame): DedupKey | null {
   if (
