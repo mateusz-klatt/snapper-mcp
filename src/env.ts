@@ -99,6 +99,25 @@ export function computeRefreshUrl(baseUrl: URL): URL {
 }
 
 /**
+ * Derive the dedicated ws_token-issuance endpoint URL from the
+ * validated `/api/mcp` base URL.
+ *
+ * The Snapper backend exposes `POST /api/auth/ws_token` so a
+ * long-running watch client can mint one-shot WebSocket tokens via
+ * its access bearer WITHOUT rotating the shared refresh-token pair.
+ * That decoupling lets a host-level watch process run alongside the
+ * proxy MCP server against the same delegate's access bearer
+ * without the watch flow touching `/api/auth/refresh`.
+ *
+ * Returns a URL on the same origin as `baseUrl`, mirrors the
+ * `computeRefreshUrl` shape exactly so error mapping / logging in
+ * the call sites stays uniform.
+ */
+export function computeWsTokenUrl(baseUrl: URL): URL {
+  return new URL("/api/auth/ws_token", baseUrl.origin);
+}
+
+/**
  * Derive the WS endpoint URL for the upcoming `snapper-mcp watch`
  * subcommand from the validated `/api/mcp` base URL.
  *

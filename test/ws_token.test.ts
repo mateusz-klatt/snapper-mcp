@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { NoRefreshTokenError, RefreshFailedError } from "../src/errors.js";
+import { RefreshFailedError } from "../src/errors.js";
 import { createLogger } from "../src/logger.js";
 import { TokenStore } from "../src/token_store.js";
 import { fetchWsToken } from "../src/ws_token.js";
@@ -11,7 +11,7 @@ function makeSilentLogger() {
   return createLogger({ prefix: "test", level: "error", timestamps: false });
 }
 
-function makeStore(access = "a1", refresh: string | null = "r1"): TokenStore {
+function makeStore(access = "access-token", refresh: string | null = null): TokenStore {
   return new TokenStore({ access, refresh });
 }
 
@@ -22,21 +22,20 @@ function makeResponse(status: number, body: unknown = null): Response {
   });
 }
 
-function fullPayload(overrides: Record<string, unknown> = {}): {
-  payload: Record<string, unknown>;
-} {
+function wsTokenEnvelope(
+  overrides: Record<string, unknown> = {},
+): { payload: Record<string, unknown> } {
   return {
     payload: {
-      access_token: "new-access",
-      refresh_token: "new-refresh",
       ws_token: "ws-token-abc",
       ws_token_exp: "2026-04-27T12:00:00Z",
+      expires_in: 900,
       ...overrides,
     },
   };
 }
 
-describe("fetchWsToken — happy path + URL/header contract", () => {
+describe("fetchWsToken — URL + header contract", () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
@@ -48,9 +47,9 @@ describe("fetchWsToken — happy path + URL/header contract", () => {
     vi.unstubAllGlobals();
   });
 
-  it("POSTs to /api/auth/refresh?return_tokens=true with Bearer refresh and Content-Type", async () => {
-    fetchMock.mockResolvedValueOnce(makeResponse(200, fullPayload()));
-    const store = makeStore("a-old", "r-old");
+  it("POSTs to /api/auth/ws_token on the same origin with Bearer access and no body Content-Type", async () => {
+    fetchMock.mockResolvedValueOnce(makeResponse(200, wsTokenEnvelope()));
+    const store = makeStore("watch-access");
     await fetchWsToken(
       new URL("http://localhost:8000/api/mcp"),
       store,
@@ -60,19 +59,69 @@ describe("fetchWsToken — happy path + URL/header contract", () => {
     expect(fetchMock).toHaveBeenCalledOnce();
     const [url, init] = fetchMock.mock.calls[0] as FetchArgs;
     expect(url instanceof URL ? url.toString() : String(url)).toBe(
-      "http://localhost:8000/api/auth/refresh?return_tokens=true",
+      "http://localhost:8000/api/auth/ws_token",
     );
     expect(init?.method).toBe("POST");
     const sent = new Headers(init?.headers);
-    expect(sent.get("authorization")).toBe("Bearer r-old");
-    expect(sent.get("content-type")).toBe("application/json");
+    expect(sent.get("authorization")).toBe("Bearer watch-access");
+    expect(sent.get("content-type")).toBeNull();
   });
 
-  it("returns the captured ws_token + ws_token_exp from the refresh payload", async () => {
+  it("derives the ws_token URL from the configured base origin (https case)", async () => {
+    fetchMock.mockResolvedValueOnce(makeResponse(200, wsTokenEnvelope()));
+    await fetchWsToken(
+      new URL("https://api.snapper.example.com/api/mcp"),
+      makeStore(),
+      makeSilentLogger(),
+    );
+    const [url] = fetchMock.mock.calls[0] as FetchArgs;
+    expect(url instanceof URL ? url.toString() : String(url)).toBe(
+      "https://api.snapper.example.com/api/auth/ws_token",
+    );
+  });
+
+  it("does NOT modify the TokenStore on success (no rotation)", async () => {
+    fetchMock.mockResolvedValueOnce(makeResponse(200, wsTokenEnvelope()));
+    const store = makeStore("untouched-access", "untouched-refresh");
+    await fetchWsToken(
+      new URL("http://localhost:8000/api/mcp"),
+      store,
+      makeSilentLogger(),
+    );
+    expect(store.accessToken()).toBe("untouched-access");
+    expect(store.current().refresh).toBe("untouched-refresh");
+  });
+
+  it("supports access-only (PAT-mode) delegates without a refresh credential", async () => {
+    fetchMock.mockResolvedValueOnce(makeResponse(200, wsTokenEnvelope()));
+    const store = makeStore("pat-access", null);
+    const result = await fetchWsToken(
+      new URL("http://localhost:8000/api/mcp"),
+      store,
+      makeSilentLogger(),
+    );
+    expect(result.ws_token).toBe("ws-token-abc");
+    expect(store.hasRefreshToken()).toBe(false);
+  });
+});
+
+describe("fetchWsToken — happy path payload extraction", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("returns the ws_token + ws_token_exp tuple from the response payload", async () => {
     fetchMock.mockResolvedValueOnce(
       makeResponse(
         200,
-        fullPayload({ ws_token: "captured-ws", ws_token_exp: "2026-12-31T23:59:00Z" }),
+        wsTokenEnvelope({ ws_token: "captured-ws", ws_token_exp: "2026-12-31T23:59:00Z" }),
       ),
     );
     const result = await fetchWsToken(
@@ -86,186 +135,9 @@ describe("fetchWsToken — happy path + URL/header contract", () => {
     });
   });
 
-  it("publishes the rotated TokenPair on the store regardless of ws_token validity", async () => {
+  it("accepts ISO 8601 with explicit +00:00 offset and microsecond fraction", async () => {
     fetchMock.mockResolvedValueOnce(
-      makeResponse(
-        200,
-        fullPayload({ access_token: "rotated-a", refresh_token: "rotated-r" }),
-      ),
-    );
-    const store = makeStore("a-old", "r-old");
-    await fetchWsToken(
-      new URL("http://localhost:8000/api/mcp"),
-      store,
-      makeSilentLogger(),
-    );
-    expect(store.accessToken()).toBe("rotated-a");
-    expect(store.current()).toEqual({ access: "rotated-a", refresh: "rotated-r" });
-  });
-
-  it("ignores extra payload fields (csrf_token, user, message) and other envelope fields", async () => {
-    fetchMock.mockResolvedValueOnce(
-      makeResponse(200, {
-        session_id: "irrelevant",
-        sequence_id: 7,
-        public_id: "irrelevant",
-        timestamp: "irrelevant",
-        payload: {
-          access_token: "a",
-          refresh_token: "r",
-          ws_token: "ws",
-          ws_token_exp: "2026-04-27T12:00:00Z",
-          csrf_token: "csrf",
-          user: { username: "alice" },
-          message: "session refreshed",
-          unknown_future_field: 42,
-        },
-      }),
-    );
-    const result = await fetchWsToken(
-      new URL("http://localhost:8000/api/mcp"),
-      makeStore(),
-      makeSilentLogger(),
-    );
-    expect(result).toEqual({ ws_token: "ws", ws_token_exp: "2026-04-27T12:00:00Z" });
-  });
-});
-
-describe("fetchWsToken — PAT-mode rejection", () => {
-  let fetchMock: ReturnType<typeof vi.fn>;
-
-  beforeEach(() => {
-    fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
-  });
-
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
-  it("throws NoRefreshTokenError without an HTTP round-trip when refresh is null", async () => {
-    const store = makeStore("a", null);
-    await expect(
-      fetchWsToken(new URL("http://localhost:8000/api/mcp"), store, makeSilentLogger()),
-    ).rejects.toBeInstanceOf(NoRefreshTokenError);
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
-
-  it("throws NoRefreshTokenError without an HTTP round-trip when refresh is empty string", async () => {
-    const store = new TokenStore({ access: "a", refresh: "" });
-    await expect(
-      fetchWsToken(new URL("http://localhost:8000/api/mcp"), store, makeSilentLogger()),
-    ).rejects.toBeInstanceOf(NoRefreshTokenError);
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
-});
-
-describe("fetchWsToken — burned-refresh safety", () => {
-  let fetchMock: ReturnType<typeof vi.fn>;
-
-  beforeEach(() => {
-    fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
-  });
-
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
-  it("publishes the new TokenPair THEN rejects when ws_token field is missing", async () => {
-    fetchMock.mockResolvedValueOnce(
-      makeResponse(200, {
-        payload: {
-          access_token: "rot-a",
-          refresh_token: "rot-r",
-          ws_token_exp: "2026-04-27T12:00:00Z",
-        },
-      }),
-    );
-    const store = makeStore("a-old", "r-old");
-    await expect(
-      fetchWsToken(new URL("http://localhost:8000/api/mcp"), store, makeSilentLogger()),
-    ).rejects.toMatchObject({
-      name: "RefreshFailedError",
-      status: 200,
-      message: expect.stringMatching(/ws_token missing or empty/i),
-    });
-    expect(store.accessToken()).toBe("rot-a");
-    expect(store.current()).toEqual({ access: "rot-a", refresh: "rot-r" });
-  });
-
-  it("publishes the new TokenPair THEN rejects when ws_token_exp is not parseable", async () => {
-    fetchMock.mockResolvedValueOnce(
-      makeResponse(200, {
-        payload: {
-          access_token: "rot-a",
-          refresh_token: "rot-r",
-          ws_token: "ws",
-          ws_token_exp: "not-a-date",
-        },
-      }),
-    );
-    const store = makeStore("a-old", "r-old");
-    await expect(
-      fetchWsToken(new URL("http://localhost:8000/api/mcp"), store, makeSilentLogger()),
-    ).rejects.toMatchObject({
-      name: "RefreshFailedError",
-      status: 200,
-      message: expect.stringMatching(/not a parseable ISO 8601 datetime/i),
-    });
-    expect(store.accessToken()).toBe("rot-a");
-  });
-
-  it("publishes the new TokenPair THEN rejects when ws_token_exp is a numeric epoch (server contract is ISO string)", async () => {
-    fetchMock.mockResolvedValueOnce(
-      makeResponse(200, {
-        payload: {
-          access_token: "rot-a",
-          refresh_token: "rot-r",
-          ws_token: "ws",
-          ws_token_exp: 1735689600,
-        },
-      }),
-    );
-    const store = makeStore("a-old", "r-old");
-    await expect(
-      fetchWsToken(new URL("http://localhost:8000/api/mcp"), store, makeSilentLogger()),
-    ).rejects.toMatchObject({
-      name: "RefreshFailedError",
-      status: 200,
-      message: expect.stringMatching(/ws_token_exp missing or empty/i),
-    });
-    expect(store.accessToken()).toBe("rot-a");
-  });
-
-  it("publishes the new TokenPair THEN rejects a plain calendar date that Date.parse alone would accept (regex tightens drift detection)", async () => {
-    fetchMock.mockResolvedValueOnce(
-      makeResponse(200, {
-        payload: {
-          access_token: "rot-a",
-          refresh_token: "rot-r",
-          ws_token: "ws",
-          ws_token_exp: "2026-04-27",
-        },
-      }),
-    );
-    const store = makeStore("a-old", "r-old");
-    await expect(
-      fetchWsToken(new URL("http://localhost:8000/api/mcp"), store, makeSilentLogger()),
-    ).rejects.toMatchObject({
-      name: "RefreshFailedError",
-      status: 200,
-      message: expect.stringMatching(/not a parseable ISO 8601 datetime/i),
-    });
-    expect(store.accessToken()).toBe("rot-a");
-  });
-
-  it("accepts ISO datetime with timezone offset (+00:00 form)", async () => {
-    fetchMock.mockResolvedValueOnce(
-      makeResponse(
-        200,
-        fullPayload({ ws_token_exp: "2026-04-27T12:00:00.123456+00:00" }),
-      ),
+      makeResponse(200, wsTokenEnvelope({ ws_token_exp: "2026-04-27T12:00:00.123456+00:00" })),
     );
     const result = await fetchWsToken(
       new URL("http://localhost:8000/api/mcp"),
@@ -274,92 +146,9 @@ describe("fetchWsToken — burned-refresh safety", () => {
     );
     expect(result.ws_token_exp).toBe("2026-04-27T12:00:00.123456+00:00");
   });
-
-  it("publishes the new TokenPair THEN rejects when ws_token_exp is empty string", async () => {
-    fetchMock.mockResolvedValueOnce(
-      makeResponse(200, {
-        payload: {
-          access_token: "rot-a",
-          refresh_token: "rot-r",
-          ws_token: "ws",
-          ws_token_exp: "",
-        },
-      }),
-    );
-    const store = makeStore("a-old", "r-old");
-    await expect(
-      fetchWsToken(new URL("http://localhost:8000/api/mcp"), store, makeSilentLogger()),
-    ).rejects.toMatchObject({
-      name: "RefreshFailedError",
-      status: 200,
-      message: expect.stringMatching(/ws_token_exp missing or empty/i),
-    });
-    expect(store.accessToken()).toBe("rot-a");
-  });
-
-  it("does NOT publish the TokenPair when access_token is missing (full refresh failure surfaces via RefreshFailedError)", async () => {
-    fetchMock.mockResolvedValueOnce(
-      makeResponse(200, {
-        payload: {
-          refresh_token: "rot-r",
-          ws_token: "ws",
-          ws_token_exp: "2026-04-27T12:00:00Z",
-        },
-      }),
-    );
-    const store = makeStore("a-old", "r-old");
-    await expect(
-      fetchWsToken(new URL("http://localhost:8000/api/mcp"), store, makeSilentLogger()),
-    ).rejects.toMatchObject({
-      name: "RefreshFailedError",
-      status: 200,
-      message: expect.stringMatching(/access_token missing or empty/i),
-    });
-    expect(store.accessToken()).toBe("a-old");
-    expect(store.current()).toEqual({ access: "a-old", refresh: "r-old" });
-  });
-
-  it("rejects when the refresh response body is not a JSON object (e.g. JSON string)", async () => {
-    fetchMock.mockResolvedValueOnce(
-      new Response(JSON.stringify("not an object"), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      }),
-    );
-    const store = makeStore("a-old", "r-old");
-    await expect(
-      fetchWsToken(new URL("http://localhost:8000/api/mcp"), store, makeSilentLogger()),
-    ).rejects.toMatchObject({
-      name: "RefreshFailedError",
-      status: 200,
-      message: expect.stringMatching(/body is not a JSON object/i),
-    });
-    expect(store.accessToken()).toBe("a-old");
-  });
-
-  it("rejects when payload.refresh_token is missing or empty", async () => {
-    fetchMock.mockResolvedValueOnce(
-      makeResponse(200, {
-        payload: {
-          access_token: "rot-a",
-          ws_token: "ws",
-          ws_token_exp: "2026-04-27T12:00:00Z",
-        },
-      }),
-    );
-    const store = makeStore("a-old", "r-old");
-    await expect(
-      fetchWsToken(new URL("http://localhost:8000/api/mcp"), store, makeSilentLogger()),
-    ).rejects.toMatchObject({
-      name: "RefreshFailedError",
-      status: 200,
-      message: expect.stringMatching(/refresh_token missing or empty/i),
-    });
-    expect(store.accessToken()).toBe("a-old");
-  });
 });
 
-describe("fetchWsToken — HTTP error paths", () => {
+describe("fetchWsToken — HTTP failure mapping", () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
@@ -371,8 +160,8 @@ describe("fetchWsToken — HTTP error paths", () => {
     vi.unstubAllGlobals();
   });
 
-  it("throws RefreshFailedError(401) when the refresh route rejects", async () => {
-    fetchMock.mockResolvedValueOnce(makeResponse(401, { detail: "rejected" }));
+  it("maps 401 to RefreshFailedError(ws_token rejected (401))", async () => {
+    fetchMock.mockResolvedValueOnce(makeResponse(401, { detail: "Authentication required" }));
     await expect(
       fetchWsToken(
         new URL("http://localhost:8000/api/mcp"),
@@ -382,11 +171,27 @@ describe("fetchWsToken — HTTP error paths", () => {
     ).rejects.toMatchObject({
       name: "RefreshFailedError",
       status: 401,
+      message: expect.stringContaining("rejected (401)"),
     });
   });
 
-  it("throws RefreshFailedError with matching status on 5xx", async () => {
-    fetchMock.mockResolvedValueOnce(makeResponse(503, { detail: "server error" }));
+  it("maps 429 to RefreshFailedError(ws_token rate-limited)", async () => {
+    fetchMock.mockResolvedValueOnce(makeResponse(429, { detail: "rate-limit exceeded" }));
+    await expect(
+      fetchWsToken(
+        new URL("http://localhost:8000/api/mcp"),
+        makeStore(),
+        makeSilentLogger(),
+      ),
+    ).rejects.toMatchObject({
+      name: "RefreshFailedError",
+      status: 429,
+      message: expect.stringContaining("rate-limited"),
+    });
+  });
+
+  it("maps 5xx to RefreshFailedError(ws_token server error)", async () => {
+    fetchMock.mockResolvedValueOnce(makeResponse(503));
     await expect(
       fetchWsToken(
         new URL("http://localhost:8000/api/mcp"),
@@ -396,42 +201,12 @@ describe("fetchWsToken — HTTP error paths", () => {
     ).rejects.toMatchObject({
       name: "RefreshFailedError",
       status: 503,
+      message: expect.stringContaining("server error"),
     });
   });
 
-  it("throws RefreshFailedError(0) on network error", async () => {
-    fetchMock.mockRejectedValueOnce(new TypeError("ECONNREFUSED"));
-    await expect(
-      fetchWsToken(
-        new URL("http://localhost:8000/api/mcp"),
-        makeStore(),
-        makeSilentLogger(),
-      ),
-    ).rejects.toMatchObject({
-      name: "RefreshFailedError",
-      status: 0,
-      message: expect.stringMatching(/network error/i),
-    });
-  });
-
-  it("throws RefreshFailedError with timeout message on AbortError", async () => {
-    const abortError = Object.assign(new Error("aborted"), { name: "AbortError" });
-    fetchMock.mockRejectedValueOnce(abortError);
-    await expect(
-      fetchWsToken(
-        new URL("http://localhost:8000/api/mcp"),
-        makeStore(),
-        makeSilentLogger(),
-      ),
-    ).rejects.toMatchObject({
-      name: "RefreshFailedError",
-      status: 0,
-      message: expect.stringMatching(/timeout/i),
-    });
-  });
-
-  it("throws RefreshFailedError with unexpected-status message on 4xx non-401", async () => {
-    fetchMock.mockResolvedValueOnce(makeResponse(404, { detail: "missing" }));
+  it("maps non-2xx non-401/429/5xx (e.g. 404) to RefreshFailedError(ws_token unexpected status)", async () => {
+    fetchMock.mockResolvedValueOnce(makeResponse(404));
     await expect(
       fetchWsToken(
         new URL("http://localhost:8000/api/mcp"),
@@ -441,53 +216,12 @@ describe("fetchWsToken — HTTP error paths", () => {
     ).rejects.toMatchObject({
       name: "RefreshFailedError",
       status: 404,
-      message: expect.stringMatching(/unexpected status/i),
-    });
-  });
-
-  it("throws RefreshFailedError on non-JSON 2xx body", async () => {
-    fetchMock.mockResolvedValueOnce(new Response("not json", { status: 200 }));
-    await expect(
-      fetchWsToken(
-        new URL("http://localhost:8000/api/mcp"),
-        makeStore(),
-        makeSilentLogger(),
-      ),
-    ).rejects.toMatchObject({
-      name: "RefreshFailedError",
-      message: expect.stringMatching(/not JSON/i),
-    });
-  });
-
-  it("throws RefreshFailedError on 204 (no body, parsed as empty stream)", async () => {
-    fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
-    await expect(
-      fetchWsToken(
-        new URL("http://localhost:8000/api/mcp"),
-        makeStore(),
-        makeSilentLogger(),
-      ),
-    ).rejects.toBeInstanceOf(RefreshFailedError);
-  });
-
-  it("throws RefreshFailedError on 422 with descriptive message", async () => {
-    fetchMock.mockResolvedValueOnce(
-      makeResponse(422, { detail: [{ msg: "validation failed" }] }),
-    );
-    await expect(
-      fetchWsToken(
-        new URL("http://localhost:8000/api/mcp"),
-        makeStore(),
-        makeSilentLogger(),
-      ),
-    ).rejects.toMatchObject({
-      name: "RefreshFailedError",
-      status: 422,
+      message: expect.stringContaining("unexpected status"),
     });
   });
 });
 
-describe("fetchWsToken — single-flight rotate semantics", () => {
+describe("fetchWsToken — transport failure mapping", () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
@@ -499,61 +233,169 @@ describe("fetchWsToken — single-flight rotate semantics", () => {
     vi.unstubAllGlobals();
   });
 
-  it("two concurrent fetchWsToken calls coalesce under TokenStore.rotate; one captures, the other surfaces an explicit retry error", async () => {
-    fetchMock.mockResolvedValueOnce(
-      makeResponse(
-        200,
-        fullPayload({ ws_token: "ws-coalesced", ws_token_exp: "2026-04-27T12:00:00Z" }),
+  it("maps a generic network error to RefreshFailedError(ws_token network error)", async () => {
+    fetchMock.mockRejectedValueOnce(new Error("ECONNREFUSED"));
+    await expect(
+      fetchWsToken(
+        new URL("http://localhost:8000/api/mcp"),
+        makeStore(),
+        makeSilentLogger(),
       ),
-    );
-    const store = makeStore();
-    const logger = makeSilentLogger();
-
-    const settled = await Promise.allSettled([
-      fetchWsToken(new URL("http://localhost:8000/api/mcp"), store, logger),
-      fetchWsToken(new URL("http://localhost:8000/api/mcp"), store, logger),
-    ]);
-
-    const fulfilled = settled.filter(
-      (s): s is PromiseFulfilledResult<Awaited<ReturnType<typeof fetchWsToken>>> =>
-        s.status === "fulfilled",
-    );
-    const rejected = settled.filter(
-      (s): s is PromiseRejectedResult => s.status === "rejected",
-    );
-    expect(fulfilled).toHaveLength(1);
-    expect(rejected).toHaveLength(1);
-    expect(fulfilled[0].value).toEqual({
-      ws_token: "ws-coalesced",
-      ws_token_exp: "2026-04-27T12:00:00Z",
-    });
-    expect(rejected[0].reason).toMatchObject({
+    ).rejects.toMatchObject({
       name: "RefreshFailedError",
-      message: expect.stringMatching(/joined an existing refresh/i),
+      status: 0,
+      message: expect.stringContaining("network error"),
     });
-    expect(fetchMock).toHaveBeenCalledOnce();
   });
 
-  it("after a coalesce-loser failure, a subsequent fetchWsToken call succeeds", async () => {
-    fetchMock
-      .mockResolvedValueOnce(makeResponse(200, fullPayload({ ws_token: "ws-1" })))
-      .mockResolvedValueOnce(makeResponse(200, fullPayload({ ws_token: "ws-2" })));
-    const store = makeStore();
-    const logger = makeSilentLogger();
+  it("maps an AbortError to RefreshFailedError(ws_token timeout after 10s)", async () => {
+    const abortErr = new Error("aborted");
+    abortErr.name = "AbortError";
+    fetchMock.mockRejectedValueOnce(abortErr);
+    await expect(
+      fetchWsToken(
+        new URL("http://localhost:8000/api/mcp"),
+        makeStore(),
+        makeSilentLogger(),
+      ),
+    ).rejects.toMatchObject({
+      name: "RefreshFailedError",
+      status: 0,
+      message: expect.stringContaining("timeout after 10s"),
+    });
+  });
+});
 
-    const [a, b] = await Promise.allSettled([
-      fetchWsToken(new URL("http://localhost:8000/api/mcp"), store, logger),
-      fetchWsToken(new URL("http://localhost:8000/api/mcp"), store, logger),
-    ]);
-    const statuses = [a.status, b.status].sort((x, y) => x.localeCompare(y));
-    expect(statuses).toEqual(["fulfilled", "rejected"]);
+describe("fetchWsToken — payload validation", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
 
-    const second = await fetchWsToken(
-      new URL("http://localhost:8000/api/mcp"),
-      store,
-      logger,
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("rejects a non-JSON 200 body with RefreshFailedError(ws_token response malformed: not JSON)", async () => {
+    const response = new Response("<html>not-json</html>", {
+      status: 200,
+      headers: { "Content-Type": "text/html" },
+    });
+    fetchMock.mockResolvedValueOnce(response);
+    await expect(
+      fetchWsToken(
+        new URL("http://localhost:8000/api/mcp"),
+        makeStore(),
+        makeSilentLogger(),
+      ),
+    ).rejects.toMatchObject({
+      name: "RefreshFailedError",
+      message: expect.stringContaining("not JSON"),
+    });
+  });
+
+  it("rejects a top-level JSON null body", async () => {
+    const response = new Response("null", {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+    fetchMock.mockResolvedValueOnce(response);
+    await expect(
+      fetchWsToken(
+        new URL("http://localhost:8000/api/mcp"),
+        makeStore(),
+        makeSilentLogger(),
+      ),
+    ).rejects.toMatchObject({
+      message: expect.stringContaining("body is not a JSON object"),
+    });
+  });
+
+  it("rejects a top-level non-object body (e.g. a JSON string)", async () => {
+    fetchMock.mockResolvedValueOnce(makeResponse(200, "unexpected"));
+    await expect(
+      fetchWsToken(
+        new URL("http://localhost:8000/api/mcp"),
+        makeStore(),
+        makeSilentLogger(),
+      ),
+    ).rejects.toMatchObject({
+      message: expect.stringContaining("body is not a JSON object"),
+    });
+  });
+
+  it("rejects a missing payload.ws_token", async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeResponse(200, { payload: { ws_token_exp: "2026-04-27T12:00:00Z" } }),
     );
-    expect(second.ws_token).toBe("ws-2");
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await expect(
+      fetchWsToken(
+        new URL("http://localhost:8000/api/mcp"),
+        makeStore(),
+        makeSilentLogger(),
+      ),
+    ).rejects.toMatchObject({
+      message: expect.stringContaining("payload.ws_token"),
+    });
+  });
+
+  it("rejects an empty-string payload.ws_token", async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeResponse(200, wsTokenEnvelope({ ws_token: "" })),
+    );
+    await expect(
+      fetchWsToken(
+        new URL("http://localhost:8000/api/mcp"),
+        makeStore(),
+        makeSilentLogger(),
+      ),
+    ).rejects.toMatchObject({
+      message: expect.stringContaining("payload.ws_token"),
+    });
+  });
+
+  it("rejects a missing payload.ws_token_exp", async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeResponse(200, { payload: { ws_token: "ws-abc" } }),
+    );
+    await expect(
+      fetchWsToken(
+        new URL("http://localhost:8000/api/mcp"),
+        makeStore(),
+        makeSilentLogger(),
+      ),
+    ).rejects.toMatchObject({
+      message: expect.stringContaining("payload.ws_token_exp"),
+    });
+  });
+
+  it("rejects a non-ISO 8601 payload.ws_token_exp (e.g. bare date)", async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeResponse(200, wsTokenEnvelope({ ws_token_exp: "2026-04-27" })),
+    );
+    await expect(
+      fetchWsToken(
+        new URL("http://localhost:8000/api/mcp"),
+        makeStore(),
+        makeSilentLogger(),
+      ),
+    ).rejects.toMatchObject({
+      message: expect.stringContaining("ISO 8601"),
+    });
+  });
+
+  it("rejects a payload.ws_token_exp that the regex accepts but Date.parse rejects", async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeResponse(200, wsTokenEnvelope({ ws_token_exp: "2026-13-99T99:99:99Z" })),
+    );
+    await expect(
+      fetchWsToken(
+        new URL("http://localhost:8000/api/mcp"),
+        makeStore(),
+        makeSilentLogger(),
+      ),
+    ).rejects.toBeInstanceOf(RefreshFailedError);
   });
 });

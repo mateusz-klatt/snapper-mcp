@@ -439,4 +439,24 @@ describe("hasTopic — runtime narrowing guard", () => {
       expect.fail("hasTopic must narrow stamped frames to PublishedDataFrame");
     }
   });
+
+  it("returns false when topic is a non-string non-null (defensive against malformed frames)", () => {
+    const malformed = {
+      ...ENVELOPE,
+      type: "signal" as const,
+      topic: 42 as unknown as string | null,
+      instrument: "BTC-USD",
+      exchange: "kraken",
+      side: "buy",
+      strength: 1,
+      reason: "rsi crossed 30",
+      price: null,
+      strategy_name: null,
+      fired_at: "2026-04-27T10:00:00Z",
+      wallet_public_id: "wal-1",
+      operator_public_id: null,
+      user_public_id: null,
+    };
+    expect(hasTopic(malformed as SignalFrame)).toBe(false);
+  });
 });

@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { NoRefreshTokenError } from "../src/errors.js";
 import { TokenStore } from "../src/token_store.js";
 import type { ServerFrame } from "../src/types.js";
 import {
@@ -310,32 +309,6 @@ describe("watchMain — error paths", () => {
     expect(stderrText).toMatch(/SNAPPER_BASE_URL/);
   });
 
-  it("exits 1 silently when run() rejects with NoRefreshTokenError (PAT mode)", async () => {
-    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw new Error("exit(1)");
-    });
-    stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    const { factory, sessions } = createCapturingFactory();
-    const watchPromise = watchMain({
-      source: baseEnv(),
-      argv: [],
-      install: false,
-      wsClientFactory: factory,
-      stdout: { write: () => undefined },
-    });
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, 5);
-      if (typeof timer.unref === "function") timer.unref();
-    });
-    sessions[0]?.rejectRun(new NoRefreshTokenError());
-    await expect(watchPromise).rejects.toThrow("exit(1)");
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    const stderrText = stderrSpy.mock.calls
-      .map((c) => (typeof c[0] === "string" ? c[0] : String(c[0])))
-      .join("");
-    expect(stderrText).not.toMatch(/watch session ended unexpectedly/);
-  });
-
   it("exits 1 with diagnostic stderr when run() rejects with a generic error", async () => {
     exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
       throw new Error("exit(1)");
@@ -519,7 +492,7 @@ describe("watchMain — fetchWsToken wiring", () => {
       expect(fetchSpy).toHaveBeenCalled();
       const callArgs = fetchSpy.mock.calls[0];
       const url = String(callArgs?.[0]);
-      expect(url).toContain("/api/auth/refresh");
+      expect(url).toContain("/api/auth/ws_token");
     } finally {
       vi.unstubAllGlobals();
     }

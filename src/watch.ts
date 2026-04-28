@@ -3,10 +3,10 @@
  *
  * Connects to the Snapper backend's WebSocket endpoint, subscribes to
  * the configured topic prefixes, and writes one JSONL frame per line
- * to stdout. The Claude Code Monitor primitive (per the plugin
- * manifest) reads each stdout line and surfaces it as a notification
- * inside an active conversation, giving the AI delegate push-style
- * wakeup on backend events without polling REST.
+ * to stdout. A Claude Code Monitor primitive wired at the host layer
+ * reads each stdout line and surfaces it as a notification inside an
+ * active conversation, giving the AI delegate push-style wakeup on
+ * backend events without polling REST.
  *
  * Argument syntax:
  *
@@ -25,9 +25,11 @@
  *   1. Parse argv → `parseWatchArgs`.
  *   2. Parse env → `parseEnv` (same contract as the proxy mode).
  *   3. Construct `TokenStore` + bind a `fetchWsToken` closure that
- *      shares the store (so the watch session and any concurrent
- *      proxy session see consistent token rotation, even though
- *      this entry point only spawns one of the two at a time).
+ *      reads the access bearer from the store. The watch flow does
+ *      not rotate the refresh-token pair — `fetchWsToken` calls
+ *      the dedicated `POST /api/auth/ws_token` endpoint with the
+ *      access bearer only — so the watch session does not contend
+ *      with a sibling proxy MCP server on a shared refresh JTI.
  *   4. Construct `EnvelopeMinter` (one per process — a stable
  *      session_id across the whole watch run lets server-side gap
  *      detection observe a clean per-client provenance).
@@ -36,10 +38,10 @@
  *      logger channel; stdout is reserved for the JSONL stream.
  *   6. Install one-shot SIGTERM/SIGINT handlers that call
  *      `client.close()` once and resolve the run promise.
- *   7. Await `client.run()` until either the runner exits naturally
- *      (PAT-mode fatal — see `ws_client.ts`) or shutdown is
- *      requested. Exit code reflects the path taken: 0 on graceful
- *      drain, 1 on fatal startup or unrecoverable session error.
+ *   7. Await `client.run()` until either the runner exits with an
+ *      unrecoverable error or shutdown is requested. Exit code
+ *      reflects the path taken: 0 on graceful drain, 1 on fatal
+ *      startup or an unrecoverable session error.
  *
  * Test-injection points (all in `WatchOptions`):
  *
@@ -61,7 +63,7 @@ import type { Writable } from "node:stream";
 
 import { computeWsUrl, parseEnv } from "./env.js";
 import { EnvelopeMinter } from "./envelope.js";
-import { EnvValidationError, NoRefreshTokenError } from "./errors.js";
+import { EnvValidationError } from "./errors.js";
 import { createLogger, type Logger } from "./logger.js";
 import { TokenStore } from "./token_store.js";
 import { fetchWsToken, type WsTokenResult } from "./ws_token.js";
@@ -281,9 +283,6 @@ async function runWatchSession(
     await client.run();
     return null;
   } catch (err) {
-    if (err instanceof NoRefreshTokenError) {
-      return 1;
-    }
     const message = err instanceof Error ? err.message : String(err);
     logger.error(`watch session ended unexpectedly: ${message}`);
     return 1;

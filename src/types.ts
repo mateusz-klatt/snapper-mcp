@@ -125,7 +125,7 @@ export type PublishedDataFrame = ServerDataFrame & { readonly topic: string };
 export function hasTopic<F extends FrameEnvelope>(
   frame: F,
 ): frame is F & { readonly topic: string } {
-  return frame.topic !== null;
+  return typeof frame.topic === "string";
 }
 
 /* --------------------------------------------------------------------
