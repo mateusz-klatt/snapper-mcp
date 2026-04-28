@@ -16,8 +16,13 @@
  *      `auth_complete`.
  *   4. Send a `subscribe` request for the configured topic prefixes
  *      and await `subscription_success`.
- *   5. Enter the streaming loop. Forward every server-emitted frame
- *      via the operator-supplied `onFrame` callback. Drop unknown
+ *   5. Enter the streaming loop. Forward only DATA frames (signals,
+ *      order events, AI-review variants) via the operator-supplied
+ *      `onFrame` callback. Control frames (`pong`,
+ *      `subscription_success`, `error`, the auth/reauth family) are
+ *      handled internally and surface only through the stderr
+ *      logger — the JSONL stream a Claude Code Monitor primitive
+ *      consumes stays free of protocol noise. Drop unknown
  *      `frame.type` values silently — the backend may ship new
  *      variants ahead of an npm bridge update, so the bridge stays
  *      forward-compatible by dropping rather than throwing.
@@ -605,7 +610,10 @@ class SessionRunner {
         this.socket.close(4401, "auth_expired");
         return;
       case "pong":
+        return;
       case "error":
+        this.logger.warn(`watch: server error frame: ${frame.message}`);
+        return;
       case "signal":
       case "order_event":
         this.opts.onFrame(frame);
@@ -638,7 +646,9 @@ class SessionRunner {
     const acceptedAtLeastOne = frame.topics.length > 0;
     if (isSubscribeAction && okStatus && acceptedAtLeastOne) {
       this.subscribeDeferred.resolve();
-      this.opts.onFrame(frame);
+      this.logger.info(
+        `watch: subscribed (status=${frame.status}) topics=[${frame.topics.join(",")}] denied=[${frame.denied_topics.join(",")}]`,
+      );
       return;
     }
     this.failAll(

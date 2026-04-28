@@ -11,6 +11,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - (next release TBD)
 
+## [0.3.0]
+
+Runtime release that adds a new `watch` subcommand for push-wakeup
+streaming of live trading signals + order events. Operators wire it
+manually at the host layer; plugin-manifest-level monitor wiring is
+intentionally deferred to a future release — see the `### Deferred`
+section below for the rotation-conflict reasoning.
+
+### Added
+
+- New `snapper-mcp watch [--topic PREFIX]...` subcommand. Opens an
+  authenticated WebSocket to the Snapper backend's `/api/ws`
+  endpoint (Bearer-on-upgrade), authenticates with a one-shot
+  `ws_token` minted via the existing refresh-token flow,
+  subscribes to the configured topic family roots (default:
+  `signals.` + `orders.events.`), and writes one JSONL frame per
+  line to stdout. Stderr is the logger channel; stdout is the
+  JSONL stream.
+- Reconnect with jittered exponential backoff (base 1s, max 30s,
+  ±25%); shutdown cancels any in-flight reconnect sleep promptly
+  rather than waiting it out.
+- Server-side `reauth_required` triggers a fresh ws_token mint and
+  a `reauth` frame in the same socket; `auth_expired` cycles the
+  connection from scratch.
+- Forward-compatible discriminated dispatch: unknown
+  `frame.type` values are dropped silently with a single warn line
+  so a backend that ships new frame variants ahead of an npm bridge
+  update stays compatible.
+- AI-review dedup keyed on `(type, review_public_id)` with LRU
+  eviction (default cap 10000) and deadline-based pruning every
+  60s. Cache update commits AFTER a successful frame delivery so
+  at-least-once semantics survive a thrown downstream callback.
+- Frame-size guards: 64 KiB raw frame budget pre-parse; 16 KiB
+  UTF-8 byte budget on the embedded `signal_envelope` field of an
+  AI-review request.
+- The watch subcommand forwards only DATA frames (signals, order
+  events, AI-review variants) to stdout as JSONL. Control frames
+  (subscription_success, pong, error, the auth/reauth family) are
+  handled internally and surface only through the stderr logger,
+  keeping the JSONL stream free of protocol noise.
+- New runtime dependency on `ws ^8.20.0` (and the matching
+  `@types/ws` dev dep) for the WebSocket client implementation.
+
+### Changed
+
+- `mcpServers.args` re-pinned to `@mateusz-klatt/snapper-mcp@0.3.0`
+  so a fresh `/plugin install` resolves to this runtime rather than
+  `@0.2.2`. Existing installs receive it on `/plugin update
+  snapper-mcp` or the next marketplace refresh.
+- `index.ts` argv dispatch routes to the new watch entry when
+  argv[0] === "watch"; otherwise it falls through to the existing
+  default proxy mode unchanged.
+- Stdout-gate now allows `process.stdout` in exactly two files
+  (`index.ts` + `watch.ts`) — both legitimate output channels.
+  `console.*` remains forbidden everywhere.
+
+### Deferred
+
+- Plugin-manifest-level monitor wiring for the watch subcommand is
+  intentionally NOT shipped in this release. The bridge mints the
+  one-shot `ws_token` over the existing refresh-token rotation
+  flow, and rotating that flow from a monitor process would
+  invalidate the proxy MCP server's refresh token (both processes
+  read the same `SNAPPER_REFRESH_TOKEN` from user config). A
+  future release will integrate plugin monitors once the backend
+  exposes a non-rotating ws_token endpoint or the bridge gains a
+  separate watch-only credential pair. Until then, integrate the
+  watch subcommand at the host layer using a SEPARATE delegate's
+  credentials.
+
+### Tests
+
+- 54 new bridge tests covering the WebSocket client lifecycle,
+  argv parser, JSONL contract, signal handling, and exit codes.
+  Total bridge suite: 269 (was 215). One existing test was
+  updated to assert the new control-vs-data forwarding contract.
+
 ## [0.2.2]
 
 Runtime release covering post-0.2.0 bridge UX fixes plus a plugin

@@ -1,7 +1,7 @@
 {
   "name": "@mateusz-klatt/snapper-mcp",
-  "version": "0.2.2",
-  "description": "Lightweight stdio-to-HTTP MCP bridge from Claude Desktop / Claude Code to Snapper /api/mcp.",
+  "version": "0.3.0",
+  "description": "Lightweight stdio-to-HTTP MCP bridge from Claude Desktop / Claude Code to Snapper /api/mcp, with an optional `watch` subcommand that streams live signal + order events as JSONL for Claude Code monitor primitives.",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",

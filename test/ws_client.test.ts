@@ -180,15 +180,12 @@ describe("ws_client — happy path lifecycle", () => {
     await runPromise;
   });
 
-  it("forwards subscription_success, pong, error, and order_event frames to onFrame", async () => {
+  it("forwards data frames (signal, order_event) but NOT control frames (pong, error, subscription_success) to onFrame", async () => {
     const server = await startServer([happyPathScript()]);
     const onFrame = vi.fn<(frame: ServerFrame) => void>();
     const client = createWsClient(makeOptions(server, { onFrame }));
     const runPromise = client.run();
     await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"));
-    await waitFor(() =>
-      onFrame.mock.calls.some((c) => (c[0] as { type: string }).type === "subscription_success"),
-    );
     server.emit(0, { type: "pong", active_connections: 3, ...envelopeStub() });
     server.emit(0, { type: "error", message: "boom", ...envelopeStub() });
     server.emit(0, {
@@ -208,10 +205,10 @@ describe("ws_client — happy path lifecycle", () => {
       onFrame.mock.calls.some((c) => (c[0] as { type: string }).type === "order_event"),
     );
     const types = onFrame.mock.calls.map((c) => (c[0] as { type: string }).type);
-    expect(types).toContain("subscription_success");
-    expect(types).toContain("pong");
-    expect(types).toContain("error");
     expect(types).toContain("order_event");
+    expect(types).not.toContain("subscription_success");
+    expect(types).not.toContain("pong");
+    expect(types).not.toContain("error");
     server.closeConnection(0);
     await client.close();
     await runPromise;

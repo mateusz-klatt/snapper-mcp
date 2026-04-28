@@ -406,13 +406,23 @@ describe("watchMain — stdout sink resolution", () => {
         if (typeof timer.unref === "function") timer.unref();
       });
       sessions[0]?.options.onFrame({
-        type: "pong",
+        type: "signal",
         session_id: "0192f000-0000-7000-8000-000000000001",
         sequence_id: 1,
         public_id: "0192f000-0000-7000-8000-aaaaaaaaaaaa",
         timestamp: "2026-04-28T12:00:00.000Z",
-        topic: null,
-        active_connections: 1,
+        topic: "signals.kraken.BTC-USD.rsi",
+        instrument: "BTC-USD",
+        exchange: "kraken",
+        side: "buy",
+        strength: 0.5,
+        reason: "test",
+        price: 100,
+        strategy_name: null,
+        fired_at: "2026-04-28T12:00:00.000Z",
+        wallet_public_id: "0192f000-0000-7000-8000-bbbbbbbbbbbb",
+        operator_public_id: null,
+        user_public_id: null,
       } as ServerFrame);
       expect(writeSpy).toHaveBeenCalled();
       sessions[0]?.resolveRun();
@@ -446,19 +456,29 @@ describe("watchMain — stdout sink resolution", () => {
       if (typeof timer.unref === "function") timer.unref();
     });
     sessions[0]?.options.onFrame({
-      type: "pong",
+      type: "signal",
       session_id: "0192f000-0000-7000-8000-000000000001",
       sequence_id: 1,
       public_id: "0192f000-0000-7000-8000-aaaaaaaaaaaa",
       timestamp: "2026-04-28T12:00:00.000Z",
-      topic: null,
-      active_connections: 1,
+      topic: "signals.kraken.BTC-USD.rsi",
+      instrument: "BTC-USD",
+      exchange: "kraken",
+      side: "buy",
+      strength: 0.5,
+      reason: "test",
+      price: 100,
+      strategy_name: null,
+      fired_at: "2026-04-28T12:00:00.000Z",
+      wallet_public_id: "0192f000-0000-7000-8000-bbbbbbbbbbbb",
+      operator_public_id: null,
+      user_public_id: null,
     } as ServerFrame);
     await new Promise<void>((resolve) => {
       const timer = setTimeout(resolve, 5);
       if (typeof timer.unref === "function") timer.unref();
     });
-    expect(chunks.join("")).toContain('"type":"pong"');
+    expect(chunks.join("")).toContain('"type":"signal"');
     sessions[0]?.resolveRun();
     await runPromise;
   });

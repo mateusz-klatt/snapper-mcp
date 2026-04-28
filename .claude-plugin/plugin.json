@@ -1,7 +1,7 @@
 {
   "name": "snapper-mcp",
-  "version": "0.2.2",
-  "description": "Connects Claude Code / Claude Desktop to a Snapper trading backend via the /api/mcp endpoint.",
+  "version": "0.3.0",
+  "description": "Connects Claude Code / Claude Desktop to a Snapper trading backend via the /api/mcp endpoint. Ships a `watch` subcommand that streams live signal + order events as JSONL, ready for manual host-level monitor wiring with a separate delegate's credentials.",
   "author": {
     "name": "Mateusz Klatt",
     "url": "https://github.com/mateusz-klatt"
@@ -43,7 +43,7 @@
     "snapper": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@mateusz-klatt/snapper-mcp@0.2.2"],
+      "args": ["-y", "@mateusz-klatt/snapper-mcp@0.3.0"],
       "env": {
         "SNAPPER_BASE_URL": "${user_config.SNAPPER_BASE_URL}",
         "SNAPPER_ACCESS_TOKEN": "${user_config.SNAPPER_ACCESS_TOKEN}",
