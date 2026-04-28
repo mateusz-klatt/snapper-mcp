@@ -26,27 +26,10 @@ export default defineConfig({
         "src/generated/**",
       ],
       thresholds: {
-        // Lines stay at 100 — no dead code; every executable line
-        // runs somewhere in the suite. Functions at 95 leaves a
-        // one-function buffer for setTimeout/abort arrow callbacks
-        // whose only trigger is a real 10s timer; exercising them
-        // via vi.advanceTimersByTime leaks an "unhandled rejection"
-        // on CI across Node 22 runners and is not worth fighting for
-        // a single anonymous arrow. Statements at 97 leaves headroom
-        // for SDK error-handler arms in `main.ts` that fire only on
-        // a malformed backend handshake (covered by the subprocess
-        // suite at integration scope rather than v8 unit-test
-        // instrumentation), plus the build-time `__PKG_VERSION__` /
-        // `__PKG_NAME__` define-time fallbacks tsup inlines at build.
-        // Branches at 89 leaves room for `??` / `||` defaults on
-        // values always defined at runtime by the option resolver
-        // closures (every test passes overrides, so the default-arm
-        // fall-throughs are exercised only in a real production run
-        // with no operator-supplied options).
         lines: 100,
-        functions: 95,
-        statements: 97,
-        branches: 89,
+        functions: 100,
+        statements: 100,
+        branches: 100,
       },
     },
   },

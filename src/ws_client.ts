@@ -193,17 +193,14 @@ interface Deferred<T> {
  * inside a constructor body.
  */
 function createDeferred<T>(): Deferred<T> {
-  let resolveFn: ((value: T) => void) | undefined;
-  let rejectFn: ((err: Error) => void) | undefined;
+  let resolveFn!: (value: T) => void;
+  let rejectFn!: (err: Error) => void;
   const promise = silenceUnhandledRejection(
     new Promise<T>((res, rej) => {
       resolveFn = res;
       rejectFn = rej;
     }),
   );
-  if (resolveFn === undefined || rejectFn === undefined) {
-    throw new Error("Promise executor did not run synchronously");
-  }
   return {
     promise,
     resolve: resolveFn,
@@ -280,9 +277,7 @@ export function createWsClient(opts: WsClientOptions): WsClient {
     pruneTimer = setInterval(() => {
       pruneExpired(dedupCache, Date.now());
     }, config.dedupPruneIntervalMs);
-    if (typeof pruneTimer.unref === "function") {
-      pruneTimer.unref();
-    }
+    pruneTimer.unref();
   }
 
   function stopPruneTimer(): void {
@@ -560,9 +555,7 @@ class SessionRunner {
       };
       this.sendClientFrame(ping);
     }, this.config.heartbeatIntervalMs);
-    if (typeof this.heartbeatTimer.unref === "function") {
-      this.heartbeatTimer.unref();
-    }
+    this.heartbeatTimer.unref();
   }
 
   private stopHeartbeat(): void {
@@ -808,14 +801,14 @@ async function withTimeout<T>(
   ms: number,
   label: string,
 ): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | null = null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => reject(new Error(`watch: timeout waiting for ${label} after ${ms}ms`)), ms);
-    if (timer !== null && typeof timer.unref === "function") timer.unref();
+    timer.unref();
   });
   try {
     return await Promise.race([promise, timeout]);
   } finally {
-    if (timer !== null) clearTimeout(timer);
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
