@@ -47,7 +47,7 @@ describe("fetchWsToken — URL + header contract", () => {
     vi.unstubAllGlobals();
   });
 
-  it("POSTs to /api/auth/ws_token on the same origin with Bearer access + Content-Type", async () => {
+  it("POSTs to /api/auth/ws_token on the same origin with Bearer access and no body Content-Type", async () => {
     fetchMock.mockResolvedValueOnce(makeResponse(200, wsTokenEnvelope()));
     const store = makeStore("watch-access");
     await fetchWsToken(
