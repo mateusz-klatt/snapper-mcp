@@ -180,19 +180,35 @@ function silenceUnhandledRejection<T>(p: Promise<T>): Promise<T> {
   return p;
 }
 
-class Deferred<T> {
+interface Deferred<T> {
   readonly promise: Promise<T>;
-  resolve!: (value: T) => void;
-  reject!: (err: Error) => void;
+  resolve: (value: T) => void;
+  reject: (err: Error) => void;
+}
 
-  constructor() {
-    this.promise = silenceUnhandledRejection(
-      new Promise<T>((res, rej) => {
-        this.resolve = res;
-        this.reject = rej;
-      }),
-    );
+/**
+ * Factory for an externally-resolvable promise pair. Provided as a
+ * function rather than a class constructor so the no-op rejection
+ * handler can be attached without putting an asynchronous operation
+ * inside a constructor body.
+ */
+function createDeferred<T>(): Deferred<T> {
+  let resolveFn: ((value: T) => void) | undefined;
+  let rejectFn: ((err: Error) => void) | undefined;
+  const promise = silenceUnhandledRejection(
+    new Promise<T>((res, rej) => {
+      resolveFn = res;
+      rejectFn = rej;
+    }),
+  );
+  if (resolveFn === undefined || rejectFn === undefined) {
+    throw new Error("Promise executor did not run synchronously");
   }
+  return {
+    promise,
+    resolve: resolveFn,
+    reject: rejectFn,
+  };
 }
 
 function defaultSocketFactory(
@@ -372,7 +388,7 @@ export function createWsClient(opts: WsClientOptions): WsClient {
   return {
     run: () => {
       if (runComplete !== null) return runComplete.promise;
-      runComplete = new Deferred<void>();
+      runComplete = createDeferred<void>();
       const deferred = runComplete;
       runForever()
         .then(
@@ -416,11 +432,11 @@ class SessionRunner {
   private readonly logger: Logger;
   private readonly minter: EnvelopeMinter;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
-  private readonly authRequiredDeferred = new Deferred<void>();
-  private readonly authCompleteDeferred = new Deferred<void>();
-  private readonly subscribeDeferred = new Deferred<void>();
+  private readonly authRequiredDeferred = createDeferred<void>();
+  private readonly authCompleteDeferred = createDeferred<void>();
+  private readonly subscribeDeferred = createDeferred<void>();
   private reauthDeferred: Deferred<void> | null = null;
-  private readonly streamingDeferred = new Deferred<void>();
+  private readonly streamingDeferred = createDeferred<void>();
   private opened = false;
   private closed = false;
   private subscribed = false;
@@ -750,7 +766,7 @@ class SessionRunner {
       return;
     }
     if (this.closed) return;
-    const deferred = new Deferred<void>();
+    const deferred = createDeferred<void>();
     this.reauthDeferred = deferred;
     this.sendClientFrame({
       type: "reauth",
