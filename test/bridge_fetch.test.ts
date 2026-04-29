@@ -423,8 +423,6 @@ describe("makePerformRefresh", () => {
   });
 
   it("throws RefreshFailedError with 'timeout' message on AbortError (10s budget)", async () => {
-    // fetch rejecting with an AbortError-named Error mimics the DOMException
-    // the runtime surfaces when AbortController.abort() fires.
     const abortError = Object.assign(new Error("aborted"), { name: "AbortError" });
     fetchMock.mockRejectedValueOnce(abortError);
     const refresh = makePerformRefresh(
@@ -436,6 +434,34 @@ describe("makePerformRefresh", () => {
       status: 0,
       message: expect.stringMatching(/timeout/i),
     });
+  });
+
+  it("aborts a hung refresh fetch when the 10s timeout fires", async () => {
+    vi.useFakeTimers();
+    try {
+      fetchMock.mockImplementationOnce((_url: URL, init: RequestInit) => {
+        const signal = init.signal;
+        return new Promise<Response>((_resolve, reject) => {
+          if (!(signal instanceof AbortSignal)) return;
+          signal.addEventListener("abort", () => {
+            const abortError = Object.assign(new Error("aborted"), { name: "AbortError" });
+            reject(abortError);
+          });
+        });
+      });
+      const refresh = makePerformRefresh(
+        new URL("http://localhost:8000/api/mcp"),
+        makeSilentLogger(),
+      );
+      const promise = refresh({ access: "a1", refresh: "r1" }).catch((err: unknown) => err);
+      await vi.advanceTimersByTimeAsync(10_000);
+      await expect(promise).resolves.toMatchObject({
+        name: "RefreshFailedError",
+        message: expect.stringMatching(/timeout/i),
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("throws RefreshFailedError on malformed (non-JSON) 2xx body", async () => {

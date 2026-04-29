@@ -98,6 +98,20 @@ describe("parseCliFlags", () => {
     expect(result.remaining).toEqual([]);
   });
 
+  it("uses an empty string when a supported space-form flag has no following value", () => {
+    const result = parseCliFlags(["--config"]);
+    expect(result.flags).toEqual({ ...EMPTY_FLAGS, configPath: "" });
+    expect(result.remaining).toEqual([]);
+  });
+
+  it("skips sparse argv entries defensively", () => {
+    const argv = ["--access-token=A"] as Array<string | undefined>;
+    argv.unshift(undefined);
+    const result = parseCliFlags(argv as readonly string[]);
+    expect(result.flags).toEqual({ ...EMPTY_FLAGS, accessToken: "A" });
+    expect(result.remaining).toEqual([]);
+  });
+
   it("does not treat watch topics as config flags", () => {
     const result = parseCliFlags(["--config=/tmp/env.json", "--topic", "orders.events."]);
     expect(result.flags.configPath).toBe("/tmp/env.json");

@@ -78,11 +78,13 @@ const FLAG_NAMES: ReadonlyMap<string, CliFlagKey> = new Map([
   ["--watch-access-token", "watchAccessToken"],
 ]);
 
+const noopLoggerMethod = (): undefined => undefined;
+
 const NOOP_LOGGER: Logger = {
-  debug: () => undefined,
-  info: () => undefined,
-  warn: () => undefined,
-  error: () => undefined,
+  debug: noopLoggerMethod,
+  info: noopLoggerMethod,
+  warn: noopLoggerMethod,
+  error: noopLoggerMethod,
 };
 
 interface ResolvedValue {
@@ -205,13 +207,19 @@ function assertConfigFileHardening(path: string, stats: Stats, logger: Logger): 
   if (!stats.isFile()) {
     throw new EnvValidationError(`Config file ${path} must be a regular file.`);
   }
-  if ((stats.mode & 0o002) !== 0) {
-    throw new EnvValidationError(`Config file ${path} is world-writable; refusing to read it.`);
-  }
   if (stats.size > CONFIG_FILE_MAX_BYTES) {
     throw new EnvValidationError(`Config file ${path} exceeds the 1 MiB size limit.`);
   }
-  if (process.platform !== "win32" && (stats.mode & 0o044) !== 0) {
+  if (process.platform === "win32") {
+    // POSIX `stats.mode` permission bits do not map cleanly to NTFS ACLs.
+    // Skip the mode-based hardening checks on Windows; rely on file
+    // ownership / ACLs surfacing through `readFile` failures instead.
+    return;
+  }
+  if ((stats.mode & 0o002) !== 0) {
+    throw new EnvValidationError(`Config file ${path} is world-writable; refusing to read it.`);
+  }
+  if ((stats.mode & 0o044) !== 0) {
     logger.warn(`config file ${path} is group- or world-readable; mode 0600 is recommended`);
   }
 }

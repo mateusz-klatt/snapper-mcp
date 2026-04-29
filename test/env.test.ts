@@ -1,3 +1,7 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -124,6 +128,27 @@ describe("parseEnv", () => {
         expect(error.variable).toBe("SNAPPER_BASE_URL");
         expect(error.message).toMatch(/not a valid URL/);
       }
+    }
+  });
+
+  it("loads values from --config before falling back to environment variables", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "snapper-mcp-env-"));
+    try {
+      const configPath = path.join(root, "env.json");
+      await writeFile(
+        configPath,
+        JSON.stringify({
+          SNAPPER_BASE_URL: "https://config.example.com/api/mcp",
+          SNAPPER_ACCESS_TOKEN: "config-access",
+        }),
+        { mode: 0o600 },
+      );
+      const result = await parseEnv(baseEnv(), [`--config=${configPath}`]);
+      expect(result.baseUrl.toString()).toBe("https://config.example.com/api/mcp/");
+      expect(result.accessToken).toBe("config-access");
+      expect(result.refreshToken).toBe("refresh-jwt");
+    } finally {
+      await rm(root, { recursive: true, force: true });
     }
   });
 });

@@ -64,6 +64,59 @@ describe("main — in-process lifecycle", () => {
     expect(stderrText).toContain("snapper");
   });
 
+  it("uses process.env, process.argv, and installs handlers when options are omitted", async () => {
+    const [stdioTransport] = InMemoryTransport.createLinkedPair();
+    const originalArgv = process.argv;
+    const previousBaseUrl = process.env.SNAPPER_BASE_URL;
+    const previousAccess = process.env.SNAPPER_ACCESS_TOKEN;
+    const previousRefresh = process.env.SNAPPER_REFRESH_TOKEN;
+    const previousLogLevel = process.env.SNAPPER_MCP_LOG_LEVEL;
+    const before = { term: process.listenerCount("SIGTERM"), int: process.listenerCount("SIGINT") };
+    process.argv = ["/usr/bin/node", "/usr/local/bin/snapper-mcp"];
+    process.env.SNAPPER_BASE_URL = server.baseUrl.toString();
+    process.env.SNAPPER_ACCESS_TOKEN = "access-jwt";
+    process.env.SNAPPER_REFRESH_TOKEN = "refresh-jwt";
+    process.env.SNAPPER_MCP_LOG_LEVEL = "error";
+    try {
+      await main({ stdioTransport });
+      const after = { term: process.listenerCount("SIGTERM"), int: process.listenerCount("SIGINT") };
+      expect(after.term).toBeGreaterThan(before.term);
+      expect(after.int).toBeGreaterThan(before.int);
+      const extraTerm = after.term - before.term;
+      const extraInt = after.int - before.int;
+      for (let i = 0; i < extraTerm; i += 1) {
+        const listener = process.listeners("SIGTERM").pop();
+        if (listener) process.removeListener("SIGTERM", listener);
+      }
+      for (let i = 0; i < extraInt; i += 1) {
+        const listener = process.listeners("SIGINT").pop();
+        if (listener) process.removeListener("SIGINT", listener);
+      }
+    } finally {
+      process.argv = originalArgv;
+      if (previousBaseUrl === undefined) {
+        delete process.env.SNAPPER_BASE_URL;
+      } else {
+        process.env.SNAPPER_BASE_URL = previousBaseUrl;
+      }
+      if (previousAccess === undefined) {
+        delete process.env.SNAPPER_ACCESS_TOKEN;
+      } else {
+        process.env.SNAPPER_ACCESS_TOKEN = previousAccess;
+      }
+      if (previousRefresh === undefined) {
+        delete process.env.SNAPPER_REFRESH_TOKEN;
+      } else {
+        process.env.SNAPPER_REFRESH_TOKEN = previousRefresh;
+      }
+      if (previousLogLevel === undefined) {
+        delete process.env.SNAPPER_MCP_LOG_LEVEL;
+      } else {
+        process.env.SNAPPER_MCP_LOG_LEVEL = previousLogLevel;
+      }
+    }
+  });
+
   it("exits 1 when env var SNAPPER_BASE_URL is missing", async () => {
     exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
       throw new Error("exit(1)");

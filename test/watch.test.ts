@@ -15,6 +15,7 @@ import {
   type WatchOptions,
 } from "../src/watch.js";
 import type { WsClient, WsClientOptions } from "../src/ws_client.js";
+import { makeMockWsServer, type ConnectionScript } from "./helpers/mock_ws_server.js";
 
 describe("resolvePackageName", () => {
   it("returns the build-time global verbatim when it is a string", () => {
@@ -144,6 +145,41 @@ function baseEnv(overrides: Record<string, string | undefined> = {}): NodeJS.Pro
     SNAPPER_MCP_LOG_LEVEL: "error",
     ...overrides,
   } as NodeJS.ProcessEnv;
+}
+
+function watchProtocolScript(): ConnectionScript {
+  return {
+    onConnect: (socket) => {
+      socket.send(JSON.stringify({ type: "auth_required", timeout: 10 }));
+    },
+    handlers: {
+      authenticate: ({ socket }) => {
+        socket.send(JSON.stringify({ type: "auth_ok", exp: "2026-04-28T13:00:00.000Z" }));
+        socket.send(
+          JSON.stringify({
+            type: "auth_complete",
+            available_topics: ["signals."],
+            user_role: "ai_delegate",
+            session_expires_at: "2026-04-28T20:00:00.000Z",
+            ws_token_exp: "2026-04-28T13:00:00.000Z",
+          }),
+        );
+      },
+      subscribe: ({ socket }) => {
+        socket.send(
+          JSON.stringify({
+            type: "subscription_success",
+            action: "subscribe",
+            status: "subscribed",
+            topics: ["signals."],
+            denied_topics: [],
+            active_subscriptions: ["signals."],
+            message: null,
+          }),
+        );
+      },
+    },
+  };
 }
 
 class FakeSignalSource implements SignalSource {
@@ -408,6 +444,54 @@ describe("watchMain — error paths", () => {
     }
   });
 
+  it("uses process.env when no source option is supplied", async () => {
+    const previousBaseUrl = process.env.SNAPPER_BASE_URL;
+    const previousAccess = process.env.SNAPPER_ACCESS_TOKEN;
+    const previousWatchAccess = process.env.SNAPPER_WATCH_ACCESS_TOKEN;
+    const previousLogLevel = process.env.SNAPPER_MCP_LOG_LEVEL;
+    process.env.SNAPPER_BASE_URL = "http://localhost:8000/api/mcp";
+    process.env.SNAPPER_ACCESS_TOKEN = "access-tok";
+    process.env.SNAPPER_WATCH_ACCESS_TOKEN = "watch-tok";
+    process.env.SNAPPER_MCP_LOG_LEVEL = "error";
+    try {
+      const { factory, sessions } = createCapturingFactory();
+      const runPromise = watchMain({
+        argv: [],
+        install: false,
+        wsClientFactory: factory,
+        stdout: { write: () => undefined },
+      });
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 5);
+        if (typeof timer.unref === "function") timer.unref();
+      });
+      expect(sessions[0]?.options.tokenStore.accessToken()).toBe("watch-tok");
+      sessions[0]?.resolveRun();
+      await runPromise;
+    } finally {
+      if (previousBaseUrl === undefined) {
+        delete process.env.SNAPPER_BASE_URL;
+      } else {
+        process.env.SNAPPER_BASE_URL = previousBaseUrl;
+      }
+      if (previousAccess === undefined) {
+        delete process.env.SNAPPER_ACCESS_TOKEN;
+      } else {
+        process.env.SNAPPER_ACCESS_TOKEN = previousAccess;
+      }
+      if (previousWatchAccess === undefined) {
+        delete process.env.SNAPPER_WATCH_ACCESS_TOKEN;
+      } else {
+        process.env.SNAPPER_WATCH_ACCESS_TOKEN = previousWatchAccess;
+      }
+      if (previousLogLevel === undefined) {
+        delete process.env.SNAPPER_MCP_LOG_LEVEL;
+      } else {
+        process.env.SNAPPER_MCP_LOG_LEVEL = previousLogLevel;
+      }
+    }
+  });
+
   it("install defaults to true when no install option is supplied", async () => {
     const { factory, sessions } = createCapturingFactory();
     const signalSource = new FakeSignalSource();
@@ -426,6 +510,61 @@ describe("watchMain — error paths", () => {
     expect(signalSource.handlers.get("SIGINT")?.size).toBe(1);
     sessions[0]?.resolveRun();
     await runPromise;
+  });
+
+  it("uses the default WsClient factory when none is supplied", async () => {
+    const server = await makeMockWsServer([watchProtocolScript()]);
+    const signalSource = new FakeSignalSource();
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          payload: {
+            ws_token: "ws-token-abc",
+            ws_token_exp: "2026-04-28T13:00:00.000Z",
+          },
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    let runPromise: Promise<void> | null = null;
+    try {
+      const baseUrl = new URL(server.url.toString());
+      baseUrl.protocol = "http:";
+      baseUrl.pathname = "/api/mcp";
+      runPromise = watchMain({
+        source: baseEnv({ SNAPPER_BASE_URL: baseUrl.toString() }),
+        argv: ["--topic", "signals."],
+        stdout: { write: () => undefined },
+        install: true,
+        signalSource,
+      });
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          reject(new Error("timed out waiting for default WsClient subscription"));
+        }, 2_000);
+        const poll = setInterval(() => {
+          if (server.received.some((r) => r.parsed.type === "subscribe")) {
+            clearInterval(poll);
+            clearTimeout(timer);
+            resolve();
+          }
+        }, 5);
+      });
+      expect(fetchMock).toHaveBeenCalled();
+      signalSource.fire("SIGTERM");
+      await runPromise;
+    } finally {
+      signalSource.fire("SIGTERM");
+      vi.unstubAllGlobals();
+      await server.close();
+      if (runPromise !== null) {
+        await runPromise.catch(() => undefined);
+      }
+    }
   });
 
   it("exits 1 with stringified diagnostic when run() rejects with a non-Error value", async () => {
@@ -743,6 +882,53 @@ describe("watchMain — stdout sink resolution", () => {
       if (typeof timer.unref === "function") timer.unref();
     });
     expect(chunks.join("")).toContain('"type":"signal"');
+    sessions[0]?.resolveRun();
+    await runPromise;
+  });
+
+  it("swallows rejected writes from a Web Streams stdout target", async () => {
+    const write = vi.fn().mockRejectedValue(new Error("closed"));
+    const writableStream = {
+      getWriter: () => ({
+        write,
+      }),
+    };
+    const { factory, sessions } = createCapturingFactory();
+    const runPromise = watchMain({
+      source: baseEnv(),
+      argv: [],
+      install: false,
+      wsClientFactory: factory,
+      stdout: writableStream as unknown as Pick<WritableStream, "getWriter">,
+    });
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 5);
+      if (typeof timer.unref === "function") timer.unref();
+    });
+    sessions[0]?.options.onFrame({
+      type: "signal",
+      session_id: "0192f000-0000-7000-8000-000000000001",
+      sequence_id: 1,
+      public_id: "0192f000-0000-7000-8000-aaaaaaaaaaaa",
+      timestamp: "2026-04-28T12:00:00.000Z",
+      topic: "signals.kraken.BTC-USD.rsi",
+      instrument: "BTC-USD",
+      exchange: "kraken",
+      side: "buy",
+      strength: 0.5,
+      reason: "test",
+      price: 100,
+      strategy_name: null,
+      fired_at: "2026-04-28T12:00:00.000Z",
+      wallet_public_id: "0192f000-0000-7000-8000-bbbbbbbbbbbb",
+      operator_public_id: null,
+      user_public_id: null,
+    } as ServerFrame);
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 5);
+      if (typeof timer.unref === "function") timer.unref();
+    });
+    expect(write).toHaveBeenCalled();
     sessions[0]?.resolveRun();
     await runPromise;
   });
