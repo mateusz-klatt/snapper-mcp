@@ -1217,14 +1217,29 @@ describe("ws_client — runs with all defaults applied", () => {
 });
 
 describe("ws_client — runner failure propagation", () => {
+  it("preserves Error instances from runner startup failures", async () => {
+    const server = await startServer([]);
+    const setIntervalSpy = vi.spyOn(globalThis, "setInterval").mockImplementationOnce(() => {
+      throw new Error("timer object unavailable");
+    });
+    try {
+      const client = createWsClient(makeOptions(server));
+      await expect(client.run()).rejects.toThrow("timer object unavailable");
+      await client.close();
+    } finally {
+      setIntervalSpy.mockRestore();
+    }
+  });
+
   it("rejects run() when prune timer startup throws a non-Error value", async () => {
     const server = await startServer([]);
     const setIntervalSpy = vi.spyOn(globalThis, "setInterval").mockImplementationOnce(() => {
-      throw "timer unavailable";
+      throw ("timer unavailable" as unknown as Error);
     });
     try {
       const client = createWsClient(makeOptions(server));
       await expect(client.run()).rejects.toThrow("timer unavailable");
+      await client.close();
     } finally {
       setIntervalSpy.mockRestore();
     }
