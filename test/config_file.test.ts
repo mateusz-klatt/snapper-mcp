@@ -158,6 +158,7 @@ describe("loadConfigFile", () => {
   });
 
   it("throws when the path resolves to a non-regular file", async () => {
+    if (process.platform === "win32") return;
     const root = await tempRoot();
     roots.push(root);
     const filePath = path.join(root, "device-link");

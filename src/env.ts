@@ -237,7 +237,7 @@ function parseConfigJson(path: string, text: string): ConfigFile {
   const raw = parsed as Record<string, unknown>;
   const config: Partial<Record<ConfigKey, string>> = {};
   for (const key of CONFIG_KEYS) {
-    if (!Object.prototype.hasOwnProperty.call(raw, key)) continue;
+    if (!Object.hasOwn(raw, key)) continue;
     config[key] = validateKnownConfigValue(key, raw[key], path);
   }
   return config;

@@ -453,6 +453,7 @@ describe("ws_client — reauth flow", () => {
     server.closeConnection(0);
     await client.close();
     await runPromise;
+    expect(server.received.some((r) => r.parsed.type === "reauth")).toBe(false);
   });
 
   it("on reauth_required, mints a fresh ws_token and sends a reauth frame", async () => {
@@ -1342,6 +1343,11 @@ describe("ws_client — close-before-open via injected socket", () => {
     );
     await client.close();
     await runPromise;
+    expect(
+      logger.warn.mock.calls.some(
+        (c) => typeof c[0] === "string" && c[0].includes("(no reason)"),
+      ),
+    ).toBe(true);
   });
 });
 
