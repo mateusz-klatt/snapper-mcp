@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 import { TokenStore } from "../src/token_store.js";
 import type { ServerFrame } from "../src/types.js";
@@ -40,6 +43,21 @@ describe("parseWatchArgs", () => {
     expect(args.topics).toEqual(["signals.", "orders.events."]);
   });
 
+  it("extracts config flags before parsing topic arguments", () => {
+    const args = parseWatchArgs([
+      "--config=/tmp/env.json",
+      "--topic",
+      "signals.",
+      "--watch-access-token",
+      "watch",
+      "--base-url=https://snapper.example.com/api/mcp",
+    ]);
+    expect(args.topics).toEqual(["signals."]);
+    expect(args.flags.configPath).toBe("/tmp/env.json");
+    expect(args.flags.watchAccessToken).toBe("watch");
+    expect(args.flags.baseUrl).toBe("https://snapper.example.com/api/mcp");
+  });
+
   it("rejects --topic without a following value", () => {
     expect(() => parseWatchArgs(["--topic"])).toThrow(WatchArgsError);
   });
@@ -54,6 +72,12 @@ describe("parseWatchArgs", () => {
 
   it("rejects an unknown argument", () => {
     expect(() => parseWatchArgs(["--unknown", "x"])).toThrow(WatchArgsError);
+  });
+
+  it("redacts JWT-shaped values in unknown arguments", () => {
+    const token = `${"a".repeat(24)}.${"b".repeat(24)}.${"c".repeat(24)}`;
+    expect(() => parseWatchArgs([`--secret=${token}`])).toThrow(/<jwt-/);
+    expect(() => parseWatchArgs([`--secret=${token}`])).not.toThrow(token);
   });
 
   it("rejects when one of multiple topics fails the trailing-dot rule", () => {
@@ -116,6 +140,7 @@ function baseEnv(overrides: Record<string, string | undefined> = {}): NodeJS.Pro
     SNAPPER_BASE_URL: "http://localhost:8000/api/mcp",
     SNAPPER_ACCESS_TOKEN: "access-tok",
     SNAPPER_REFRESH_TOKEN: "refresh-tok",
+    SNAPPER_WATCH_ACCESS_TOKEN: "watch-tok",
     SNAPPER_MCP_LOG_LEVEL: "error",
     ...overrides,
   } as NodeJS.ProcessEnv;
@@ -441,156 +466,117 @@ describe("watchMain — error paths", () => {
   });
 });
 
-describe("watchMain — plugin-monitor graceful skip", () => {
+describe("watchMain — config-file startup", () => {
   let exitSpy: ReturnType<typeof vi.spyOn>;
   let stderrSpy: ReturnType<typeof vi.spyOn>;
+  const roots: string[] = [];
 
-  afterEach(() => {
+  afterEach(async () => {
     exitSpy?.mockRestore();
     stderrSpy?.mockRestore();
+    await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
   });
 
-  it("returns cleanly without spawning a WS client when CLAUDE_PLUGIN_ROOT is set but no access-token rung resolves", async () => {
-    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw new Error("exit-was-called");
-    });
-    stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    const factoryCalls: number[] = [];
-    const factory = (): WsClient => {
-      factoryCalls.push(1);
-      return {
-        run: () => Promise.resolve(),
-        close: () => Promise.resolve(),
-      } as unknown as WsClient;
-    };
-    await watchMain({
-      source: {
-        CLAUDE_PLUGIN_ROOT: "/path/to/plugin",
-        CLAUDE_PLUGIN_OPTION_SNAPPER_BASE_URL: "http://localhost:8000/api/mcp",
-        SNAPPER_MCP_LOG_LEVEL: "error",
-      } as NodeJS.ProcessEnv,
-      argv: [],
-      install: false,
-      wsClientFactory: factory,
-      stdout: { write: () => undefined },
-    });
-    expect(exitSpy).not.toHaveBeenCalled();
-    expect(factoryCalls).toEqual([]);
-    const stderrText = stderrSpy.mock.calls
-      .map((c) => (typeof c[0] === "string" ? c[0] : String(c[0])))
-      .join("");
-    expect(stderrText).toMatch(/SNAPPER_WATCH_ACCESS_TOKEN/);
-    expect(stderrText).toMatch(/staying idle/);
-  });
+  async function tempRoot(): Promise<string> {
+    const root = await mkdtemp(path.join(tmpdir(), "snapper-mcp-watch-"));
+    roots.push(root);
+    return root;
+  }
 
-  it("graceful-skip path also fires when plugin context is detected via CLAUDE_PLUGIN_ROOT alone (defensive fallback signal, no CLAUDE_PLUGIN_OPTION_* present)", async () => {
-    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw new Error("exit-was-called");
-    });
-    stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    let factoryCalls = 0;
-    const factory = (): WsClient => {
-      factoryCalls += 1;
-      return {
-        run: () => Promise.resolve(),
-        close: () => Promise.resolve(),
-      } as unknown as WsClient;
-    };
-    await watchMain({
-      source: {
-        CLAUDE_PLUGIN_ROOT: "/path/to/plugin",
+  it("starts from a config file when --config is present", async () => {
+    const root = await tempRoot();
+    const configPath = path.join(root, "env.json");
+    await writeFile(
+      configPath,
+      JSON.stringify({
         SNAPPER_BASE_URL: "http://localhost:8000/api/mcp",
-        SNAPPER_ACCESS_TOKEN: "rotating-proxy-token",
-        SNAPPER_MCP_LOG_LEVEL: "error",
-      } as NodeJS.ProcessEnv,
-      argv: [],
+        SNAPPER_WATCH_ACCESS_TOKEN: "config-watch",
+      }),
+      { mode: 0o600 },
+    );
+    const { factory, sessions } = createCapturingFactory();
+    const runPromise = watchMain({
+      source: { SNAPPER_MCP_LOG_LEVEL: "error" } as NodeJS.ProcessEnv,
+      argv: [`--config=${configPath}`],
       install: false,
       wsClientFactory: factory,
       stdout: { write: () => undefined },
     });
-    expect(factoryCalls).toBe(0);
-    expect(exitSpy).not.toHaveBeenCalled();
-    const stderrText = stderrSpy.mock.calls
-      .map((c) => (typeof c[0] === "string" ? c[0] : String(c[0])))
-      .join("");
-    expect(stderrText).toMatch(/staying idle/);
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 5);
+      if (typeof timer.unref === "function") timer.unref();
+    });
+    expect(sessions).toHaveLength(1);
+    sessions[0]?.resolveRun();
+    await runPromise;
   });
 
-  it("starts the WS client normally when CLAUDE_PLUGIN_ROOT is set AND a CLAUDE_PLUGIN_OPTION_SNAPPER_WATCH_ACCESS_TOKEN is provided", async () => {
-    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw new Error("exit-was-called");
-    });
-    stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    let factoryCalls = 0;
-    const factory = (): WsClient => {
-      factoryCalls += 1;
-      return {
-        run: () => Promise.resolve(),
-        close: () => Promise.resolve(),
-      } as unknown as WsClient;
-    };
-    await watchMain({
-      source: {
-        CLAUDE_PLUGIN_ROOT: "/path/to/plugin",
-        CLAUDE_PLUGIN_OPTION_SNAPPER_BASE_URL: "http://localhost:8000/api/mcp",
-        CLAUDE_PLUGIN_OPTION_SNAPPER_WATCH_ACCESS_TOKEN: "watch-pat",
-        SNAPPER_MCP_LOG_LEVEL: "error",
-      } as NodeJS.ProcessEnv,
-      argv: [],
+  it("waits for a config file that appears during startup", async () => {
+    const root = await tempRoot();
+    const configPath = path.join(root, "delayed-env.json");
+    const timer = setTimeout(() => {
+      void writeFile(
+        configPath,
+        JSON.stringify({
+          SNAPPER_BASE_URL: "http://localhost:8000/api/mcp",
+          SNAPPER_WATCH_ACCESS_TOKEN: "config-watch",
+        }),
+        { mode: 0o600 },
+      );
+    }, 100);
+    const { factory, sessions } = createCapturingFactory();
+    try {
+      const runPromise = watchMain({
+        source: { SNAPPER_MCP_LOG_LEVEL: "error" } as NodeJS.ProcessEnv,
+        argv: [`--config=${configPath}`],
+        install: false,
+        wsClientFactory: factory,
+        stdout: { write: () => undefined },
+      });
+      await new Promise<void>((resolve) => {
+        const waiter = setTimeout(resolve, 650);
+        if (typeof waiter.unref === "function") waiter.unref();
+      });
+      expect(sessions).toHaveLength(1);
+      sessions[0]?.resolveRun();
+      await runPromise;
+    } finally {
+      clearTimeout(timer);
+    }
+  });
+
+  it("falls through to environment variables when a config file remains missing", async () => {
+    const root = await tempRoot();
+    const { factory, sessions } = createCapturingFactory();
+    const runPromise = watchMain({
+      source: baseEnv(),
+      argv: [`--config=${path.join(root, "missing-env.json")}`],
       install: false,
       wsClientFactory: factory,
       stdout: { write: () => undefined },
     });
-    expect(factoryCalls).toBe(1);
-    expect(exitSpy).not.toHaveBeenCalled();
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 1_650);
+      if (typeof timer.unref === "function") timer.unref();
+    });
+    expect(sessions).toHaveLength(1);
+    sessions[0]?.resolveRun();
+    await runPromise;
   });
 
-  it("regression: stays idle (exit 0) when plugin user_config has SNAPPER_ACCESS_TOKEN populated (rotating proxy delegate) but SNAPPER_WATCH_ACCESS_TOKEN is blank — declines the proxy-token fallback that would die at access-expiry", async () => {
+  it("hard-fails when a missing config file leaves no watch token source", async () => {
     exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
       throw new Error("exit-was-called");
     });
     stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    let factoryCalls = 0;
-    const factory = (): WsClient => {
-      factoryCalls += 1;
-      return {
-        run: () => Promise.resolve(),
-        close: () => Promise.resolve(),
-      } as unknown as WsClient;
-    };
-    await watchMain({
-      source: {
-        CLAUDE_PLUGIN_OPTION_SNAPPER_BASE_URL: "http://localhost:8000/api/mcp",
-        CLAUDE_PLUGIN_OPTION_SNAPPER_ACCESS_TOKEN: "rotating-proxy-token",
-        CLAUDE_PLUGIN_OPTION_SNAPPER_REFRESH_TOKEN: "rotating-refresh-token",
-        SNAPPER_MCP_LOG_LEVEL: "error",
-      } as NodeJS.ProcessEnv,
-      argv: [],
-      install: false,
-      wsClientFactory: factory,
-      stdout: { write: () => undefined },
-    });
-    expect(factoryCalls).toBe(0);
-    expect(exitSpy).not.toHaveBeenCalled();
-    const stderrText = stderrSpy.mock.calls
-      .map((c) => (typeof c[0] === "string" ? c[0] : String(c[0])))
-      .join("");
-    expect(stderrText).toMatch(/SNAPPER_WATCH_ACCESS_TOKEN/);
-    expect(stderrText).toMatch(/staying idle/);
-  });
-
-  it("hard-fails (exit 1) when CLAUDE_PLUGIN_ROOT is unset and no access-token rung resolves (standalone misconfiguration, not graceful skip)", async () => {
-    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw new Error("exit-was-called");
-    });
-    stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const root = await tempRoot();
     await expect(
       watchMain({
         source: {
           SNAPPER_BASE_URL: "http://localhost:8000/api/mcp",
           SNAPPER_MCP_LOG_LEVEL: "error",
         } as NodeJS.ProcessEnv,
-        argv: [],
+        argv: [`--config=${path.join(root, "missing-env.json")}`],
         install: false,
         wsClientFactory: () => ({
           run: () => Promise.resolve(),
@@ -603,7 +589,8 @@ describe("watchMain — plugin-monitor graceful skip", () => {
     const stderrText = stderrSpy.mock.calls
       .map((c) => (typeof c[0] === "string" ? c[0] : String(c[0])))
       .join("");
-    expect(stderrText).toMatch(/SNAPPER_ACCESS_TOKEN/);
+    expect(stderrText).toMatch(/SNAPPER_WATCH_ACCESS_TOKEN/);
+    expect(stderrText).toMatch(/was not found after 1500ms/);
   });
 });
 
@@ -760,4 +747,3 @@ describe("watchMain — stdout sink resolution", () => {
     await runPromise;
   });
 });
-

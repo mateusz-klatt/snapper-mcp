@@ -1,42 +1,17 @@
 /**
- * Environment-variable parsing + refresh-URL derivation.
+ * Credential parsing + URL derivation for the bridge.
  *
- * The bridge reads:
- *
- *   - SNAPPER_BASE_URL      — required. Points at Snapper's /api/mcp endpoint.
- *   - SNAPPER_ACCESS_TOKEN  — required. JWT access token for bearer auth.
- *   - SNAPPER_REFRESH_TOKEN — optional (since v0.2.0). JWT refresh
- *     token used on 401 rotation. Omit or leave blank for long-lived
- *     PAT delegates — the bridge then skips the refresh round-trip
- *     and surfaces any 401 verbatim with a PAT-specific stderr hint.
- *     Existing rotating-token setups that keep this env var set see
- *     ZERO behaviour change.
- *
- * Validation is strict on required fields: any missing or blank
- * value throws an `EnvValidationError` whose message names the
- * exact variable, so operators debugging a misconfigured Claude
- * Desktop entry see a single actionable stderr line and exit cleanly.
- *
- * `computeRefreshUrl` derives `{origin}/api/auth/refresh?return_tokens=true`
- * from the validated base URL. Exposing this as a named helper prevents
- * two known foot-guns:
- *
- *   1. Concatenating against the `/api/mcp` path (would POST to
- *      `/api/mcp/api/auth/refresh`).
- *   2. Forgetting the `?return_tokens=true` flag — without it, the
- *      backend returns an envelope whose `access_token` and
- *      `refresh_token` fields are null, and the bridge can't rotate.
- *
- * The `watch` subcommand uses `parseWatchEnv`, which differs from
- * `parseEnv` in two ways: it forces `refreshToken = null` (the watch
- * monitor must run on a long-lived PAT — see CHANGELOG [0.5.0] for the
- * access-expiry reasoning), and it pulls credentials from a precedence
- * chain that prefers Claude Code's auto-exported `CLAUDE_PLUGIN_OPTION_<KEY>`
- * env vars (set by Claude Code for every plugin subprocess) over the
- * legacy SNAPPER_* env-var contract. Standalone hosts (Option 2 / 3
- * in README) keep the original SNAPPER_* contract via the chain's
- * fallback rungs.
+ * Runtime credentials resolve per key from CLI flags, an optional JSON
+ * config file, then the legacy SNAPPER_* environment variables. Required
+ * failures name the missing key so MCP hosts surface actionable startup
+ * diagnostics without exposing token values.
  */
+
+import { readFile, stat } from "node:fs/promises";
+import { setTimeout as sleep } from "node:timers/promises";
+
+import type { Stats } from "node:fs";
+import type { Logger } from "./logger.js";
 
 export class EnvValidationError extends Error {
   constructor(
@@ -52,30 +27,78 @@ export interface BridgeEnv {
   readonly baseUrl: URL;
   readonly accessToken: string;
   readonly refreshToken: string | null;
+  readonly watchAccessToken: string | null;
+}
+
+export interface CliFlags {
+  readonly configPath: string | null;
+  readonly accessToken: string | null;
+  readonly baseUrl: string | null;
+  readonly refreshToken: string | null;
+  readonly watchAccessToken: string | null;
+}
+
+export interface ConfigFile {
+  readonly SNAPPER_BASE_URL?: string;
+  readonly SNAPPER_ACCESS_TOKEN?: string;
+  readonly SNAPPER_REFRESH_TOKEN?: string;
+  readonly SNAPPER_WATCH_ACCESS_TOKEN?: string;
 }
 
 const REQUIRED_VARS = ["SNAPPER_BASE_URL", "SNAPPER_ACCESS_TOKEN"] as const;
-const OPTIONAL_VARS = ["SNAPPER_REFRESH_TOKEN"] as const;
+const OPTIONAL_VARS = ["SNAPPER_REFRESH_TOKEN", "SNAPPER_WATCH_ACCESS_TOKEN"] as const;
+const CONFIG_KEYS = [
+  "SNAPPER_BASE_URL",
+  "SNAPPER_ACCESS_TOKEN",
+  "SNAPPER_REFRESH_TOKEN",
+  "SNAPPER_WATCH_ACCESS_TOKEN",
+] as const;
+const CONFIG_FILE_MAX_BYTES = 1024 * 1024;
+const CONFIG_FILE_RETRIES = 3;
+const CONFIG_FILE_RETRY_DELAY_MS = 500;
 
-function requireNonEmpty(name: string, raw: string | undefined): string {
-  if (raw === undefined) {
-    throw new EnvValidationError(
-      `Missing required environment variable ${name}. Set it via your Claude Desktop / Claude Code .mcp-config.json and restart the MCP host.`,
-      name,
-    );
-  }
-  const trimmed = raw.trim();
-  if (trimmed.length === 0) {
-    throw new EnvValidationError(
-      `Environment variable ${name} is set but empty. Provide a non-blank value.`,
-      name,
-    );
-  }
-  return trimmed;
+type ConfigKey = (typeof CONFIG_KEYS)[number];
+type BridgeMode = "proxy" | "watch";
+type CliFlagKey = keyof CliFlags;
+type MutableCliFlags = Record<CliFlagKey, string | null>;
+
+const EMPTY_FLAGS: CliFlags = {
+  configPath: null,
+  accessToken: null,
+  baseUrl: null,
+  refreshToken: null,
+  watchAccessToken: null,
+};
+
+const FLAG_NAMES: ReadonlyMap<string, CliFlagKey> = new Map([
+  ["--config", "configPath"],
+  ["--access-token", "accessToken"],
+  ["--base-url", "baseUrl"],
+  ["--refresh-token", "refreshToken"],
+  ["--watch-access-token", "watchAccessToken"],
+]);
+
+const NOOP_LOGGER: Logger = {
+  debug: () => undefined,
+  info: () => undefined,
+  warn: () => undefined,
+  error: () => undefined,
+};
+
+interface ResolvedValue {
+  readonly value: string | null;
 }
 
-function parseOptional(raw: string | undefined): string | null {
-  if (raw === undefined) return null;
+interface MissingDetail {
+  readonly variable: ConfigKey;
+  readonly flagNames: readonly string[];
+  readonly envNames: readonly string[];
+  readonly configPath: string | null;
+  readonly configLoaded: boolean;
+}
+
+function asPresent(raw: string | null | undefined): string | null {
+  if (raw === null || raw === undefined) return null;
   const trimmed = raw.trim();
   return trimmed.length === 0 ? null : trimmed;
 }
@@ -85,164 +108,320 @@ function parseUrl(name: string, raw: string): URL {
     return new URL(raw);
   } catch {
     throw new EnvValidationError(
-      `Environment variable ${name} is not a valid URL (got ${JSON.stringify(raw)}). Expected e.g. http://localhost:8000/api/mcp or https://snapper.example.com/api/mcp.`,
+      `${name} is not a valid URL (got ${JSON.stringify(redactToken(raw))}). Expected e.g. http://localhost:8000/api/mcp or https://snapper.example.com/api/mcp.`,
       name,
     );
   }
 }
 
-export function parseEnv(source: NodeJS.ProcessEnv = process.env): BridgeEnv {
-  const rawBase = requireNonEmpty("SNAPPER_BASE_URL", source["SNAPPER_BASE_URL"]);
-  const accessToken = requireNonEmpty("SNAPPER_ACCESS_TOKEN", source["SNAPPER_ACCESS_TOKEN"]);
-  const refreshToken = parseOptional(source["SNAPPER_REFRESH_TOKEN"]);
-  const baseUrl = parseUrl("SNAPPER_BASE_URL", rawBase);
+function normalizeBridgeUrl(raw: string): URL {
+  const baseUrl = parseUrl("SNAPPER_BASE_URL", raw);
   if (!baseUrl.pathname.endsWith("/")) {
     baseUrl.pathname = `${baseUrl.pathname}/`;
   }
-  return { baseUrl, accessToken, refreshToken };
+  return baseUrl;
 }
 
-/**
- * Detect whether the current process was spawned by Claude Code as
- * part of a plugin (mcpServer, hook, or monitor).
- *
- * Two signals are accepted, either is sufficient:
- *
- *   1. `CLAUDE_PLUGIN_OPTION_SNAPPER_BASE_URL` is set — Claude Code
- *      auto-exports every userConfig field as `CLAUDE_PLUGIN_OPTION_<KEY>`
- *      to plugin subprocesses (documented at
- *      https://code.claude.com/docs/en/plugins-reference under
- *      *userConfig*). Our manifest declares SNAPPER_BASE_URL as a
- *      required userConfig field, so its presence is a reliable
- *      plugin-context signal that does not depend on undocumented
- *      Claude-Code-internal env-var conventions.
- *   2. `CLAUDE_PLUGIN_ROOT` is set — documented as a substitution
- *      token for hook + monitor + mcpServer command strings; some
- *      Claude Code versions also export it as an env var on the
- *      spawned subprocess. Used here as a defensive-belt fallback.
- *
- * Absence of both indicates a standalone CLI host (Claude Desktop
- * manual config, direct CLI, systemd, launchd, etc.).
- *
- * The watch subcommand uses this to differentiate two missing-
- * credential failure modes: an unattended plugin monitor whose
- * SNAPPER_WATCH_ACCESS_TOKEN field is blank should sit idle and
- * exit cleanly (the proxy MCP server is the operator's primary
- * surface; spamming stderr with "missing env var" every restart
- * is hostile UX), while a standalone host with no access token
- * configured is a misconfiguration and must surface a hard error.
- */
-export function isClaudeCodePluginContext(source: NodeJS.ProcessEnv = process.env): boolean {
+function isNodeError(err: unknown): err is NodeJS.ErrnoException {
+  return err instanceof Error;
+}
+
+function configValue(configFile: ConfigFile | null, key: ConfigKey): string | null {
+  if (configFile === null) return null;
+  return asPresent(configFile[key]);
+}
+
+function envValue(source: NodeJS.ProcessEnv, key: ConfigKey): string | null {
+  return asPresent(source[key]);
+}
+
+function resolveFirst(
+  candidates: readonly [string, string | null | undefined][],
+  logger: Logger,
+  label: string,
+): ResolvedValue {
+  for (const [sourceName, raw] of candidates) {
+    const value = asPresent(raw);
+    if (value === null) continue;
+    logger.info(`${label} resolved from ${sourceName}`);
+    return { value };
+  }
+  return { value: null };
+}
+
+function flagSource(flagName: string): string {
+  return `${flagName} CLI flag`;
+}
+
+function configSource(key: ConfigKey): string {
+  return `--config file key ${key}`;
+}
+
+function envSource(key: ConfigKey): string {
+  return `${key} env var`;
+}
+
+function missingConfigRung(configPath: string | null, configLoaded: boolean): string {
+  if (configPath === null) return "--config file not given";
+  if (configLoaded) return `--config=${configPath} did not contain a non-blank value`;
+  return `--config=${configPath} was not found after 1500ms (ENOENT)`;
+}
+
+function missingMessage(detail: MissingDetail): string {
+  const flagPart =
+    detail.flagNames.length === 1
+      ? `${detail.flagNames[0]} CLI flag not given`
+      : `${detail.flagNames.join(" / ")} CLI flags not given`;
+  const envPart =
+    detail.envNames.length === 1
+      ? `${detail.envNames[0]} env var unset`
+      : `${detail.envNames.join(" / ")} env vars unset`;
+  const attempted = [flagPart, missingConfigRung(detail.configPath, detail.configLoaded), envPart];
   return (
-    typeof source["CLAUDE_PLUGIN_OPTION_SNAPPER_BASE_URL"] === "string" ||
-    typeof source["CLAUDE_PLUGIN_ROOT"] === "string"
+    `Missing required ${detail.variable}: ${attempted.join(", ")}. ` +
+    "Set it via CLI flags, your MCP host's .mcp.json, claude_desktop_config.json for Claude Desktop, or environment variables."
   );
 }
 
-function readChainedEnv(
+function requireResolved(resolved: ResolvedValue, detail: MissingDetail): string {
+  if (resolved.value !== null) return resolved.value;
+  throw new EnvValidationError(missingMessage(detail), detail.variable);
+}
+
+function validateKnownConfigValue(key: ConfigKey, value: unknown, path: string): string {
+  if (typeof value === "string") return value;
+  throw new EnvValidationError(
+    `Config file ${path} has non-string value for ${key}; expected a string.`,
+    key,
+  );
+}
+
+function formatConfigStatError(path: string, err: unknown): EnvValidationError {
+  const message = err instanceof Error ? err.message : String(err);
+  return new EnvValidationError(`Cannot read config file ${path}: ${message}`);
+}
+
+function assertConfigFileHardening(path: string, stats: Stats, logger: Logger): void {
+  if (!stats.isFile()) {
+    throw new EnvValidationError(`Config file ${path} must be a regular file.`);
+  }
+  if ((stats.mode & 0o002) !== 0) {
+    throw new EnvValidationError(`Config file ${path} is world-writable; refusing to read it.`);
+  }
+  if (stats.size > CONFIG_FILE_MAX_BYTES) {
+    throw new EnvValidationError(`Config file ${path} exceeds the 1 MiB size limit.`);
+  }
+  if (process.platform !== "win32" && (stats.mode & 0o044) !== 0) {
+    logger.warn(`config file ${path} is group- or world-readable; mode 0600 is recommended`);
+  }
+}
+
+function parseConfigJson(path: string, text: string): ConfigFile {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new EnvValidationError(`Config file ${path} is not valid JSON.`);
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new EnvValidationError(`Config file ${path} must contain a JSON object.`);
+  }
+  const raw = parsed as Record<string, unknown>;
+  const config: Partial<Record<ConfigKey, string>> = {};
+  for (const key of CONFIG_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(raw, key)) continue;
+    config[key] = validateKnownConfigValue(key, raw[key], path);
+  }
+  return config;
+}
+
+export function redactToken(value: string): string {
+  if (/^[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}$/.test(value)) {
+    return `<jwt-${value.length}-chars-ending-${value.slice(-8)}>`;
+  }
+  return value;
+}
+
+export function redactCliArg(value: string): string {
+  const eq = value.indexOf("=");
+  if (eq === -1) return redactToken(value);
+  const prefix = value.slice(0, eq + 1);
+  const suffix = value.slice(eq + 1);
+  return `${prefix}${redactToken(suffix)}`;
+}
+
+export function parseCliFlags(argv: readonly string[]): { flags: CliFlags; remaining: string[] } {
+  const flags: MutableCliFlags = { ...EMPTY_FLAGS };
+  const remaining: string[] = [];
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === undefined) continue;
+    const eq = arg.indexOf("=");
+    const flagName = eq === -1 ? arg : arg.slice(0, eq);
+    const key = FLAG_NAMES.get(flagName);
+    if (key === undefined) {
+      remaining.push(arg);
+      continue;
+    }
+    if (eq !== -1) {
+      flags[key] = arg.slice(eq + 1);
+      continue;
+    }
+    const next = argv[i + 1];
+    flags[key] = typeof next === "string" ? next : "";
+    if (typeof next === "string") i += 1;
+  }
+  return { flags, remaining };
+}
+
+export async function loadConfigFile(path: string, logger: Logger = NOOP_LOGGER): Promise<ConfigFile | null> {
+  let stats: Stats | undefined;
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      stats = await stat(path);
+      break;
+    } catch (err) {
+      if (isNodeError(err) && err.code === "ENOENT") {
+        if (attempt >= CONFIG_FILE_RETRIES) return null;
+        await sleep(CONFIG_FILE_RETRY_DELAY_MS);
+        continue;
+      }
+      throw formatConfigStatError(path, err);
+    }
+  }
+
+  if (stats === undefined) {
+    throw new EnvValidationError(`Cannot read config file ${path}: stat did not complete.`);
+  }
+  assertConfigFileHardening(path, stats, logger);
+  let text: string;
+  try {
+    text = await readFile(path, "utf8");
+  } catch (err) {
+    throw formatConfigStatError(path, err);
+  }
+  return parseConfigJson(path, text);
+}
+
+export function resolveBridgeEnv(
   source: NodeJS.ProcessEnv,
-  names: readonly string[],
-): string | null {
-  for (const name of names) {
-    const raw = source[name];
-    if (typeof raw !== "string") continue;
-    const trimmed = raw.trim();
-    if (trimmed.length > 0) return trimmed;
-  }
-  return null;
-}
-
-/**
- * Resolve the access token the watch subcommand should authenticate
- * with. The resolution differs between plugin and standalone
- * contexts on purpose:
- *
- *   - **Plugin context** (Claude Code auto-spawns the monitor): only
- *     the dedicated `*_WATCH_ACCESS_TOKEN` rungs are consulted.
- *     Falling back to the proxy delegate's access token would
- *     re-introduce v0.4.0's access-expiry death — the proxy
- *     delegate is rotating by default and its access token expires
- *     after ~15 minutes, after which the watch monitor cannot
- *     refresh without colliding with the proxy MCP server's refresh
- *     JTI. Decline the fallback and let the caller's
- *     graceful-skip gate fire instead.
- *
- *   - **Standalone context** (Claude Desktop manual config, systemd,
- *     launchd, direct CLI): the operator owns the credential
- *     selection, so falling back to `SNAPPER_ACCESS_TOKEN` is
- *     supported. Operators who want a separate watch-only PAT set
- *     `SNAPPER_WATCH_ACCESS_TOKEN`; operators who just want the
- *     existing access bearer to power both proxy + watch leave the
- *     watch field unset and watch picks up `SNAPPER_ACCESS_TOKEN`.
- *
- * Precedence order:
- *
- *   1. `CLAUDE_PLUGIN_OPTION_SNAPPER_WATCH_ACCESS_TOKEN` — Claude Code
- *      auto-exports user_config values to plugin subprocesses under
- *      this prefix; the cleanest delivery channel for the watch
- *      monitor's dedicated PAT (no argv exposure, no shell wrapping,
- *      no env-file footprint).
- *   2. `SNAPPER_WATCH_ACCESS_TOKEN` — operator-set explicit watch
- *      token in standalone deployments, parallel to (1) but outside
- *      the plugin host.
- *   3. `SNAPPER_ACCESS_TOKEN` — standalone-only fallback (skipped in
- *      plugin context to avoid the rotating-delegate access-expiry
- *      death described above).
- *
- * Returns `null` if no rung resolves OR if the only resolution is
- * the standalone fallback while in plugin context.
- */
-export function watchAccessToken(source: NodeJS.ProcessEnv = process.env): string | null {
-  const watchOnly = readChainedEnv(source, [
-    "CLAUDE_PLUGIN_OPTION_SNAPPER_WATCH_ACCESS_TOKEN",
-    "SNAPPER_WATCH_ACCESS_TOKEN",
-  ]);
-  if (watchOnly !== null) return watchOnly;
-  if (isClaudeCodePluginContext(source)) return null;
-  return readChainedEnv(source, ["SNAPPER_ACCESS_TOKEN"]);
-}
-
-function watchBaseUrl(source: NodeJS.ProcessEnv): string | null {
-  return readChainedEnv(source, [
-    "CLAUDE_PLUGIN_OPTION_SNAPPER_BASE_URL",
-    "SNAPPER_BASE_URL",
-  ]);
-}
-
-/**
- * Watch-subcommand env parser. See module docstring for the rationale
- * behind the precedence chain. Forces `refreshToken` to `null` because
- * the watch monitor MUST run in PAT mode — refresh-token rotation from
- * the watch session would race the proxy MCP server's refresh-JTI
- * (the original v0.4.0 deferral reason).
- *
- * Throws `EnvValidationError` when access-token or base-URL resolution
- * yields nothing on any rung. Callers running inside Claude Code's
- * plugin sandbox should pre-check `isClaudeCodePluginContext` +
- * `watchAccessToken === null` and exit 0 gracefully BEFORE invoking
- * this parser, so an unattended monitor with a blank watch-token
- * field stays idle instead of restart-looping the throw path.
- */
-export function parseWatchEnv(source: NodeJS.ProcessEnv = process.env): BridgeEnv {
-  const accessToken = watchAccessToken(source);
-  if (accessToken === null) {
-    throw new EnvValidationError(
-      "Missing required environment variable SNAPPER_ACCESS_TOKEN. Set it via your Claude Desktop / Claude Code .mcp-config.json and restart the MCP host.",
-      "SNAPPER_ACCESS_TOKEN",
-    );
-  }
-  const rawBase = watchBaseUrl(source);
-  if (rawBase === null) {
-    throw new EnvValidationError(
-      "Missing required environment variable SNAPPER_BASE_URL. Set it via your Claude Desktop / Claude Code .mcp-config.json and restart the MCP host.",
+  flags: CliFlags,
+  configFile: ConfigFile | null,
+  mode: BridgeMode,
+  logger: Logger = NOOP_LOGGER,
+): BridgeEnv {
+  const configLoaded = configFile !== null;
+  const base = requireResolved(
+    resolveFirst(
+      [
+        [flagSource("--base-url"), flags.baseUrl],
+        [configSource("SNAPPER_BASE_URL"), configValue(configFile, "SNAPPER_BASE_URL")],
+        [envSource("SNAPPER_BASE_URL"), envValue(source, "SNAPPER_BASE_URL")],
+      ],
+      logger,
       "SNAPPER_BASE_URL",
-    );
-  }
-  const baseUrl = parseUrl("SNAPPER_BASE_URL", rawBase);
-  if (!baseUrl.pathname.endsWith("/")) {
-    baseUrl.pathname = `${baseUrl.pathname}/`;
-  }
-  return { baseUrl, accessToken, refreshToken: null };
+    ),
+    {
+      variable: "SNAPPER_BASE_URL",
+      flagNames: ["--base-url"],
+      envNames: ["SNAPPER_BASE_URL"],
+      configPath: flags.configPath,
+      configLoaded,
+    },
+  );
+
+  const accessCandidates: readonly [string, string | null | undefined][] =
+    mode === "watch"
+      ? [
+          [flagSource("--watch-access-token"), flags.watchAccessToken],
+          [flagSource("--access-token"), flags.accessToken],
+          [
+            configSource("SNAPPER_WATCH_ACCESS_TOKEN"),
+            configValue(configFile, "SNAPPER_WATCH_ACCESS_TOKEN"),
+          ],
+          [envSource("SNAPPER_WATCH_ACCESS_TOKEN"), envValue(source, "SNAPPER_WATCH_ACCESS_TOKEN")],
+        ]
+      : [
+          [flagSource("--access-token"), flags.accessToken],
+          [configSource("SNAPPER_ACCESS_TOKEN"), configValue(configFile, "SNAPPER_ACCESS_TOKEN")],
+          [envSource("SNAPPER_ACCESS_TOKEN"), envValue(source, "SNAPPER_ACCESS_TOKEN")],
+        ];
+  const accessVariable: ConfigKey =
+    mode === "watch" ? "SNAPPER_WATCH_ACCESS_TOKEN" : "SNAPPER_ACCESS_TOKEN";
+  const access = requireResolved(
+    resolveFirst(accessCandidates, logger, accessVariable),
+    {
+      variable: accessVariable,
+      flagNames: mode === "watch" ? ["--watch-access-token", "--access-token"] : ["--access-token"],
+      envNames: [accessVariable],
+      configPath: flags.configPath,
+      configLoaded,
+    },
+  );
+
+  const refreshToken =
+    mode === "watch"
+      ? null
+      : resolveFirst(
+          [
+            [flagSource("--refresh-token"), flags.refreshToken],
+            [configSource("SNAPPER_REFRESH_TOKEN"), configValue(configFile, "SNAPPER_REFRESH_TOKEN")],
+            [envSource("SNAPPER_REFRESH_TOKEN"), envValue(source, "SNAPPER_REFRESH_TOKEN")],
+          ],
+          logger,
+          "SNAPPER_REFRESH_TOKEN",
+        ).value;
+
+  const watchAccessToken =
+    mode === "watch"
+      ? access
+      : resolveFirst(
+          [
+            [flagSource("--watch-access-token"), flags.watchAccessToken],
+            [
+              configSource("SNAPPER_WATCH_ACCESS_TOKEN"),
+              configValue(configFile, "SNAPPER_WATCH_ACCESS_TOKEN"),
+            ],
+            [envSource("SNAPPER_WATCH_ACCESS_TOKEN"), envValue(source, "SNAPPER_WATCH_ACCESS_TOKEN")],
+          ],
+          logger,
+          "SNAPPER_WATCH_ACCESS_TOKEN",
+        ).value;
+
+  return {
+    baseUrl: normalizeBridgeUrl(base),
+    accessToken: access,
+    refreshToken,
+    watchAccessToken,
+  };
+}
+
+async function parseBridgeEnv(
+  source: NodeJS.ProcessEnv,
+  argv: readonly string[],
+  mode: BridgeMode,
+  logger: Logger,
+): Promise<BridgeEnv> {
+  const { flags } = parseCliFlags(argv);
+  const configFile =
+    flags.configPath === null ? null : await loadConfigFile(flags.configPath, logger);
+  return resolveBridgeEnv(source, flags, configFile, mode, logger);
+}
+
+export async function parseEnv(
+  source: NodeJS.ProcessEnv = process.env,
+  argv: readonly string[] = process.argv.slice(2),
+  logger: Logger = NOOP_LOGGER,
+): Promise<BridgeEnv> {
+  return parseBridgeEnv(source, argv, "proxy", logger);
+}
+
+export async function parseWatchEnv(
+  source: NodeJS.ProcessEnv = process.env,
+  argv: readonly string[] = process.argv.slice(3),
+  logger: Logger = NOOP_LOGGER,
+): Promise<BridgeEnv> {
+  return parseBridgeEnv(source, argv, "watch", logger);
 }
 
 export function computeRefreshUrl(baseUrl: URL): URL {
@@ -300,7 +479,7 @@ export function computeWsTokenUrl(baseUrl: URL): URL {
 export function computeWsUrl(baseUrl: URL): URL {
   if (baseUrl.protocol !== "http:" && baseUrl.protocol !== "https:") {
     throw new EnvValidationError(
-      `snapper-mcp watch requires an http:// or https:// base URL; got ${JSON.stringify(baseUrl.protocol)}.`,
+      `snapper-mcp watch requires an http:// or https:// base URL; got ${JSON.stringify(redactToken(baseUrl.protocol))}.`,
       "SNAPPER_BASE_URL",
     );
   }
@@ -309,7 +488,7 @@ export function computeWsUrl(baseUrl: URL): URL {
     : baseUrl.pathname;
   if (normalised !== "/api/mcp") {
     throw new EnvValidationError(
-      `snapper-mcp watch requires SNAPPER_BASE_URL pathname /api/mcp; got ${JSON.stringify(baseUrl.pathname)}.`,
+      `snapper-mcp watch requires SNAPPER_BASE_URL pathname /api/mcp; got ${JSON.stringify(redactToken(baseUrl.pathname))}.`,
       "SNAPPER_BASE_URL",
     );
   }

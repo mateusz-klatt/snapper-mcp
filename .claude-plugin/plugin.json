@@ -1,7 +1,7 @@
 {
   "name": "snapper-mcp",
-  "version": "0.5.0",
-  "description": "Connects Claude Code / Claude Desktop to a Snapper trading backend via the /api/mcp endpoint. Ships a `watch` subcommand that streams live signal + order events as JSONL, auto-wired as a Claude Code plugin monitor when a watch-only PAT delegate is configured.",
+  "version": "0.6.0",
+  "description": "Connects Claude Code / Claude Desktop to a Snapper trading backend via the /api/mcp endpoint. Ships a watch subcommand that streams live signal + order events as JSONL, auto-wired as a Claude Code plugin monitor when configured.",
   "author": {
     "name": "Mateusz Klatt",
     "url": "https://github.com/mateusz-klatt"
@@ -40,8 +40,8 @@
     },
     "SNAPPER_WATCH_ACCESS_TOKEN": {
       "type": "string",
-      "title": "Watch monitor access token (optional - long-lived PAT only)",
-      "description": "Separate long-lived PAT delegate dedicated to the push-wakeup monitor. Mint a SECOND delegate in Snapper's AI Integration UI with long_lived=true and paste its access token here. Leave blank to disable the plugin monitor entry; the proxy MCP server is unaffected. The watch monitor must use a long-lived PAT because rotating delegates' access tokens expire after ~15 minutes and the monitor cannot refresh without colliding with the proxy MCP server's refresh token.",
+      "title": "Watch monitor access token (required for push-wakeup monitor)",
+      "description": "Long-lived PAT for the push-wakeup monitor. Long-lived single-delegate operators paste the SAME token as Access token (no rotation, no race). Rotating-delegate operators mint a SECOND long-lived PAT in Snapper's AI Integration UI explicitly for the monitor. Leaving this blank causes the monitor to hard-error at session start; if you don't want the monitor, disable the plugin or remove the monitors[] array from the local manifest cache.",
       "required": false,
       "sensitive": true
     }
@@ -50,18 +50,19 @@
     "snapper": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@mateusz-klatt/snapper-mcp@0.5.0"],
+      "args": ["-y", "@mateusz-klatt/snapper-mcp@0.6.0"],
       "env": {
         "SNAPPER_BASE_URL": "${user_config.SNAPPER_BASE_URL}",
         "SNAPPER_ACCESS_TOKEN": "${user_config.SNAPPER_ACCESS_TOKEN}",
-        "SNAPPER_REFRESH_TOKEN": "${user_config.SNAPPER_REFRESH_TOKEN}"
+        "SNAPPER_REFRESH_TOKEN": "${user_config.SNAPPER_REFRESH_TOKEN}",
+        "SNAPPER_WATCH_ACCESS_TOKEN": "${user_config.SNAPPER_WATCH_ACCESS_TOKEN}"
       }
     }
   },
   "monitors": [
     {
       "name": "snapper-watch",
-      "command": "npx -y @mateusz-klatt/snapper-mcp@0.5.0 watch",
+      "command": "npx -y @mateusz-klatt/snapper-mcp@0.6.0 watch --config=\"${CLAUDE_PLUGIN_DATA}/env.json\"",
       "description": "Live Snapper signal + order events streamed as JSONL"
     }
   ]

@@ -6,7 +6,7 @@ try {
   if (argv[0] === "watch") {
     await watchMain({ argv: argv.slice(1), stdout: process.stdout });
   } else {
-    await main();
+    await main({ argv });
   }
 } catch (err) {
   const message = err instanceof Error ? (err.stack ?? err.message) : String(err);

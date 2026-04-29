@@ -35,9 +35,10 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 
 import { createBridgeFetch, makePerformRefresh } from "./bridge_fetch.js";
 import { BridgeStartupError, EnvValidationError } from "./errors.js";
-import { parseEnv } from "./env.js";
+import { parseCliFlags, parseEnv, redactCliArg, type BridgeEnv } from "./env.js";
 import { createLogger } from "./logger.js";
 import { supportedMirroredCapabilities, wireProxy, type ProxyPending } from "./proxy.js";
+import { seedConfigFileIfPluginContext } from "./seed_config.js";
 import { createShutdownHandlers } from "./shutdown.js";
 import { TokenStore } from "./token_store.js";
 
@@ -66,23 +67,37 @@ const CLIENT_NAME = resolvePackageName(buildGlobals.__PKG_NAME__);
 
 export interface MainOptions {
   readonly source?: NodeJS.ProcessEnv;
+  readonly argv?: readonly string[];
   readonly stdioTransport?: StdioServerTransport;
   readonly install?: boolean;
 }
 
+function rejectUnknownProxyArgs(argv: readonly string[]): void {
+  const { remaining } = parseCliFlags(argv);
+  if (remaining.length === 0) return;
+  const rendered = remaining.map((arg) => JSON.stringify(redactCliArg(arg))).join(", ");
+  throw new EnvValidationError(
+    `Unknown argument ${rendered} — usage: snapper-mcp [--config PATH] [--base-url URL] [--access-token VALUE] [--refresh-token VALUE] [--watch-access-token VALUE]`,
+  );
+}
+
 export async function main(options: MainOptions = {}): Promise<void> {
   const source = options.source ?? process.env;
+  const argv = options.argv ?? process.argv.slice(2);
   const logger = createLogger(CLIENT_NAME, source);
 
-  let env: ReturnType<typeof parseEnv>;
+  let env: BridgeEnv;
   try {
-    env = parseEnv(source);
+    rejectUnknownProxyArgs(argv);
+    env = await parseEnv(source, argv, logger);
   } catch (err) {
     if (!(err instanceof EnvValidationError)) throw err;
     logger.error(err.message);
     process.exit(1);
     return;
   }
+
+  await seedConfigFileIfPluginContext(env, source, logger);
 
   const store = new TokenStore({ access: env.accessToken, refresh: env.refreshToken });
   const performRefresh = makePerformRefresh(env.baseUrl, logger);
