@@ -318,6 +318,34 @@ describe("ws_client — failure paths during handshake", () => {
     await runPromise;
   });
 
+  it("reconnects with zero backoff and handles auth_failed without a reason", async () => {
+    const failScript: ConnectionScript = {
+      onConnect: (socket) => {
+        socket.send(
+          JSON.stringify({ type: "auth_required", timeout: 10, ...envelopeStub() }),
+        );
+      },
+      handlers: {
+        authenticate: ({ socket }) => {
+          socket.send(JSON.stringify({ type: "auth_failed", ...envelopeStub() }));
+        },
+      },
+    };
+    const server = await startServer([failScript, happyPathScript()]);
+    const client = createWsClient(
+      makeOptions(server, {
+        reconnectBackoffBaseMs: 0,
+        reconnectBackoffMaxMs: 0,
+      }),
+    );
+    const runPromise = client.run();
+    await server.awaitConnection(1, 3_000);
+    expect(server.connections.length).toBeGreaterThanOrEqual(2);
+    server.closeConnection(1);
+    await client.close();
+    await runPromise;
+  });
+
   it("treats subscription_success with status=denied as a session error and reconnects", async () => {
     const deniedScript: ConnectionScript = {
       onConnect: (socket) => {
@@ -395,6 +423,39 @@ describe("ws_client — failure paths during handshake", () => {
 });
 
 describe("ws_client — reauth flow", () => {
+  it("ignores unsolicited reauth_ok frames when no reauth is pending", async () => {
+    const script: ConnectionScript = {
+      onConnect: (socket) => {
+        const { authRequired, authOk, authComplete } = authPair();
+        socket.send(JSON.stringify(authRequired));
+        socket.once("message", () => {
+          socket.send(JSON.stringify(authOk));
+          socket.send(JSON.stringify(authComplete));
+        });
+      },
+      handlers: {
+        subscribe: ({ socket }) => {
+          socket.send(JSON.stringify(subscriptionSuccess()));
+          socket.send(
+            JSON.stringify({
+              type: "reauth_ok",
+              exp: "2026-04-28T14:00:00.000Z",
+              ...envelopeStub(),
+            }),
+          );
+        },
+      },
+    };
+    const server = await startServer([script]);
+    const client = createWsClient(makeOptions(server));
+    const runPromise = client.run();
+    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"));
+    server.closeConnection(0);
+    await client.close();
+    await runPromise;
+    expect(server.received.some((r) => r.parsed.type === "reauth")).toBe(false);
+  });
+
   it("on reauth_required, mints a fresh ws_token and sends a reauth frame", async () => {
     const reauthScript: ConnectionScript = {
       onConnect: (socket) => {
@@ -485,6 +546,73 @@ describe("ws_client — reauth flow", () => {
     server.closeConnection(1);
     await client.close();
     await runPromise;
+  });
+
+  it("does not send reauth when the socket closes before a fresh token arrives", async () => {
+    let resolveFresh: (value: { ws_token: string; ws_token_exp: string }) => void = () => undefined;
+    let freshResolved = false;
+    const reauthScript: ConnectionScript = {
+      onConnect: (socket) => {
+        const { authRequired, authOk, authComplete } = authPair();
+        socket.send(JSON.stringify(authRequired));
+        socket.once("message", () => {
+          socket.send(JSON.stringify(authOk));
+          socket.send(JSON.stringify(authComplete));
+        });
+      },
+      handlers: {
+        subscribe: ({ socket }) => {
+          socket.send(JSON.stringify(subscriptionSuccess()));
+          socket.send(
+            JSON.stringify({
+              type: "reauth_required",
+              deadline: "2026-04-28T13:00:00.000Z",
+              ...envelopeStub(),
+            }),
+          );
+        },
+      },
+    };
+    const server = await startServer([reauthScript, happyPathScript()]);
+    const fetchWsToken = vi
+      .fn()
+      .mockResolvedValueOnce({ ws_token: "ws-tok-1", ws_token_exp: "2026-04-28T13:00:00Z" })
+      .mockImplementationOnce(
+        () =>
+          new Promise<{ ws_token: string; ws_token_exp: string }>((resolve) => {
+            resolveFresh = resolve;
+          }),
+      )
+      .mockResolvedValueOnce({ ws_token: "ws-tok-3", ws_token_exp: "2026-04-28T15:00:00Z" });
+    const client = createWsClient(
+      makeOptions(server, {
+        fetchWsToken,
+        reconnectBackoffBaseMs: 1,
+        reconnectBackoffMaxMs: 5,
+      }),
+    );
+    const runPromise = client.run();
+    try {
+      await waitFor(() => fetchWsToken.mock.calls.length >= 2);
+      server.closeConnection(0, 1000, "closed during reauth");
+      await server.awaitConnection(1, 3_000);
+      freshResolved = true;
+      resolveFresh({ ws_token: "late", ws_token_exp: "2026-04-28T14:00:00Z" });
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 30);
+        if (typeof timer.unref === "function") timer.unref();
+      });
+      expect(server.received.some((r) => r.parsed.type === "reauth")).toBe(false);
+    } finally {
+      if (!freshResolved) {
+        resolveFresh({ ws_token: "late", ws_token_exp: "2026-04-28T14:00:00Z" });
+      }
+      if (server.connections[1] !== undefined) {
+        server.closeConnection(1);
+      }
+      await client.close();
+      await runPromise;
+    }
   });
 
   it("times out waiting for reauth_ok and closes the socket", async () => {
@@ -755,6 +883,24 @@ describe("ws_client — AI-review dedup + size guards", () => {
     await runPromise;
   });
 
+  it("treats a missing ai_review.request signal_envelope as an empty envelope", async () => {
+    const server = await startServer([happyPathScript()]);
+    const onFrame = vi.fn<(frame: ServerFrame) => void>();
+    const client = createWsClient(makeOptions(server, { onFrame, maxSignalEnvelopeBytes: 4 }));
+    const runPromise = client.run();
+    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"));
+    const frame = reviewFrame(1, "2026-04-28T13:00:00.000Z");
+    delete frame.signal_envelope;
+    server.emit(0, frame);
+    await waitFor(
+      () => onFrame.mock.calls.some((c) => (c[0] as { type: string }).type === "ai_review.request"),
+    );
+    expect(onFrame).toHaveBeenCalled();
+    server.closeConnection(0);
+    await client.close();
+    await runPromise;
+  });
+
   it("dedups ai_review.decision_ack and ai_review.caps_violation by dispatch_version", async () => {
     const server = await startServer([happyPathScript()]);
     const onFrame = vi.fn<(frame: ServerFrame) => void>();
@@ -876,6 +1022,59 @@ describe("ws_client — periodic dedup pruning", () => {
       await runPromise;
     }
   });
+
+  it("keeps a future-deadline AI-review through a prune pass", async () => {
+    const server = await startServer([happyPathScript()]);
+    const onFrame = vi.fn<(frame: ServerFrame) => void>();
+    const client = createWsClient(
+      makeOptions(server, {
+        onFrame,
+        dedupPruneIntervalMs: 30,
+      }),
+    );
+    const runPromise = client.run();
+    try {
+      await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"));
+      const future = new Date(Date.now() + 60_000).toISOString();
+      const frame = {
+        type: "ai_review.request",
+        review_public_id: "0192f000-0000-7000-8000-dddddddddddd",
+        user_public_id: "0192f000-0000-7000-8000-eeeeeeeeeeee",
+        strategy_public_id: "0192f000-0000-7000-8000-ffffffffffff",
+        wallet_public_id: "0192f000-0000-7000-8000-aaaaaaaaaaaa",
+        instrument_public_id: "0192f000-0000-7000-8000-bbbbbbbbbbbb",
+        selected_delegate_public_id: "0192f000-0000-7000-8000-cccccccccccc",
+        deadline: future,
+        signal_envelope: {},
+        instrument_metadata: {},
+        dispatch_version: 1,
+        ...envelopeStub({ topic: "ai_reviews.requests" }),
+      };
+      server.emit(0, frame);
+      await waitFor(
+        () =>
+          onFrame.mock.calls.filter(
+            (c) => (c[0] as { type: string }).type === "ai_review.request",
+          ).length === 1,
+      );
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 80);
+        if (typeof timer.unref === "function") timer.unref();
+      });
+      server.emit(0, frame);
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 30);
+        if (typeof timer.unref === "function") timer.unref();
+      });
+      expect(
+        onFrame.mock.calls.filter((c) => (c[0] as { type: string }).type === "ai_review.request"),
+      ).toHaveLength(1);
+    } finally {
+      server.closeConnection(0);
+      await client.close();
+      await runPromise;
+    }
+  });
 });
 
 describe("ws_client — close()", () => {
@@ -885,6 +1084,42 @@ describe("ws_client — close()", () => {
     await client.close();
     await client.close();
     expect(server.connections.length).toBe(0);
+  });
+
+  it("run() is idempotent while the client is active", async () => {
+    const server = await startServer([happyPathScript()]);
+    const client = createWsClient(makeOptions(server));
+    const firstRun = client.run();
+    const secondRun = client.run();
+    expect(secondRun).toBe(firstRun);
+    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"));
+    await client.close();
+    await firstRun;
+  });
+
+  it("close() during ws_token mint stops before opening a socket", async () => {
+    const server = await startServer([]);
+    let resolveToken!: (value: { ws_token: string; ws_token_exp: string }) => void;
+    const fetchWsToken = vi.fn(
+      () =>
+        new Promise<{ ws_token: string; ws_token_exp: string }>((resolve) => {
+          resolveToken = resolve;
+        }),
+    );
+    const socketFactory = vi.fn();
+    const client = createWsClient(
+      makeOptions(server, {
+        fetchWsToken,
+        socketFactory: socketFactory as unknown as WsClientOptions["socketFactory"],
+      }),
+    );
+    const runPromise = client.run();
+    await waitFor(() => fetchWsToken.mock.calls.length === 1);
+    const closePromise = client.close();
+    resolveToken({ ws_token: "late", ws_token_exp: "2026-04-28T13:00:00.000Z" });
+    await closePromise;
+    await runPromise;
+    expect(socketFactory).not.toHaveBeenCalled();
   });
 
   it("a second concurrent close() awaits the same teardown rather than returning early", async () => {
@@ -982,6 +1217,36 @@ describe("ws_client — runs with all defaults applied", () => {
   });
 });
 
+describe("ws_client — runner failure propagation", () => {
+  it("preserves Error instances from runner startup failures", async () => {
+    const server = await startServer([]);
+    const setIntervalSpy = vi.spyOn(globalThis, "setInterval").mockImplementationOnce(() => {
+      throw new Error("timer object unavailable");
+    });
+    try {
+      const client = createWsClient(makeOptions(server));
+      await expect(client.run()).rejects.toThrow("timer object unavailable");
+      await client.close();
+    } finally {
+      setIntervalSpy.mockRestore();
+    }
+  });
+
+  it("rejects run() when prune timer startup throws a non-Error value", async () => {
+    const server = await startServer([]);
+    const setIntervalSpy = vi.spyOn(globalThis, "setInterval").mockImplementationOnce(() => {
+      throw ("timer unavailable" as unknown as Error);
+    });
+    try {
+      const client = createWsClient(makeOptions(server));
+      await expect(client.run()).rejects.toThrow("timer unavailable");
+      await client.close();
+    } finally {
+      setIntervalSpy.mockRestore();
+    }
+  });
+});
+
 describe("ws_client — toBuffer", () => {
   it("returns the buffer unchanged when input is already a Buffer", () => {
     const original = Buffer.from("hello");
@@ -1034,6 +1299,55 @@ describe("ws_client — close-before-open via injected socket", () => {
     expect(factorySpy.mock.calls.length).toBeGreaterThanOrEqual(1);
     await client.close();
     await runPromise;
+  });
+
+  it("waitForOpen uses a no-reason fallback when close carries an empty reason", async () => {
+    const server = await startServer([]);
+    const fakeFactory = (): WebSocket => {
+      const emitter = new EventEmitter();
+      const fake = emitter as unknown as WebSocket & {
+        close: () => void;
+        terminate: () => void;
+        send: () => void;
+      };
+      fake.close = () => undefined;
+      fake.terminate = () => undefined;
+      fake.send = () => undefined;
+      setImmediate(() => {
+        emitter.emit("close", 1006, Buffer.alloc(0));
+      });
+      return fake;
+    };
+    const factorySpy = vi.fn(fakeFactory);
+    const logger = {
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    };
+    const client = createWsClient(
+      makeOptions(server, {
+        socketFactory: factorySpy as unknown as WsClientOptions["socketFactory"],
+        logger,
+        reconnectBackoffBaseMs: 1,
+        reconnectBackoffMaxMs: 5,
+      }),
+    );
+    const runPromise = client.run();
+    await waitFor(
+      () =>
+        logger.warn.mock.calls.some(
+          (c) => typeof c[0] === "string" && c[0].includes("(no reason)"),
+        ),
+      2_000,
+    );
+    await client.close();
+    await runPromise;
+    expect(
+      logger.warn.mock.calls.some(
+        (c) => typeof c[0] === "string" && c[0].includes("(no reason)"),
+      ),
+    ).toBe(true);
   });
 });
 

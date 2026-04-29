@@ -264,6 +264,34 @@ describe("fetchWsToken — transport failure mapping", () => {
       message: expect.stringContaining("timeout after 10s"),
     });
   });
+
+  it("aborts a hung ws_token fetch when the 10s timeout fires", async () => {
+    vi.useFakeTimers();
+    try {
+      fetchMock.mockImplementationOnce((_url: URL, init: RequestInit) => {
+        const signal = init.signal;
+        return new Promise<Response>((_resolve, reject) => {
+          if (!(signal instanceof AbortSignal)) return;
+          signal.addEventListener("abort", () => {
+            const abortError = Object.assign(new Error("aborted"), { name: "AbortError" });
+            reject(abortError);
+          });
+        });
+      });
+      const promise = fetchWsToken(
+        new URL("http://localhost:8000/api/mcp"),
+        makeStore(),
+        makeSilentLogger(),
+      ).catch((err: unknown) => err);
+      await vi.advanceTimersByTimeAsync(10_000);
+      await expect(promise).resolves.toMatchObject({
+        name: "RefreshFailedError",
+        message: expect.stringContaining("timeout after 10s"),
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("fetchWsToken — payload validation", () => {

@@ -67,6 +67,14 @@ describe("plugin manifest", () => {
     expect(manifest.userConfig["SNAPPER_ACCESS_TOKEN"].required).toBe(true);
   });
 
+  it("passes all configured credential fields to the proxy MCP server", () => {
+    const env = manifest.mcpServers["snapper"].env;
+    expect(env["SNAPPER_BASE_URL"]).toBe("${user_config.SNAPPER_BASE_URL}");
+    expect(env["SNAPPER_ACCESS_TOKEN"]).toBe("${user_config.SNAPPER_ACCESS_TOKEN}");
+    expect(env["SNAPPER_REFRESH_TOKEN"]).toBe("${user_config.SNAPPER_REFRESH_TOKEN}");
+    expect(env["SNAPPER_WATCH_ACCESS_TOKEN"]).toBe("${user_config.SNAPPER_WATCH_ACCESS_TOKEN}");
+  });
+
   it("ships a single monitor entry with all required fields", () => {
     expect(Array.isArray(manifest.monitors)).toBe(true);
     expect(manifest.monitors).toHaveLength(1);
@@ -84,22 +92,26 @@ describe("plugin manifest", () => {
 
   it("invokes the watch subcommand", () => {
     const monitor = manifest.monitors[0];
-    expect(monitor.command).toMatch(/snapper-mcp@[^\s]+\s+watch\s*$/);
+    expect(monitor.command).toMatch(/snapper-mcp@[^\s]+\s+watch\b/);
   });
 
-  it("does NOT embed any substitution form into the monitor command (credentials must travel via the auto-exported CLAUDE_PLUGIN_OPTION_<KEY> env var, not via argv — this catches ${user_config.X}, ${ENV_VAR}, ${CLAUDE_PLUGIN_ROOT}, and any other ${...} form)", () => {
+  it("passes the plugin data config path to the monitor command in quoted form", () => {
     const monitor = manifest.monitors[0];
-    expect(monitor.command).not.toContain("${");
+    expect(monitor.command).toContain('--config="${CLAUDE_PLUGIN_DATA}/env.json"');
+  });
+
+  it("does not place credential values or user_config substitutions in the monitor command", () => {
+    const monitor = manifest.monitors[0];
+    expect(monitor.command).not.toContain("${user_config.");
     expect(monitor.command).not.toContain("SNAPPER_ACCESS_TOKEN");
     expect(monitor.command).not.toContain("SNAPPER_WATCH_ACCESS_TOKEN");
   });
 
-  it("does NOT shell-wrap or env-prefix the monitor command (no cross-env, no sh -c, no set, no =)", () => {
+  it("does NOT shell-wrap or env-prefix the monitor command", () => {
     const monitor = manifest.monitors[0];
     expect(monitor.command).not.toContain("cross-env");
     expect(monitor.command).not.toMatch(/\bsh\s+-c\b/);
     expect(monitor.command).not.toMatch(/\bcmd\s+\/[Cc]\b/);
-    expect(monitor.command).not.toContain("=");
   });
 
   it("starts with `npx -y` so the runtime tarball resolves regardless of the operator's npm cache state", () => {

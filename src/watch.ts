@@ -23,11 +23,10 @@
  * Lifecycle:
  *
  *   1. Parse argv → `parseWatchArgs`.
- *   2. Parse env → `parseWatchEnv` (watch-mode resolver: precedence
- *      chain over `CLAUDE_PLUGIN_OPTION_*` then `SNAPPER_*` env vars,
- *      with `refreshToken` hard-pinned to `null` because watch must
- *      run in PAT mode to avoid colliding with the proxy MCP server
- *      on the shared refresh JTI).
+ *   2. Resolve credentials from CLI flags, an optional config file,
+ *      then environment variables. Watch mode keeps refresh-token
+ *      rotation disabled so it does not contend with a sibling proxy
+ *      process.
  *   3. Construct `TokenStore` + bind a `fetchWsToken` closure that
  *      reads the access bearer from the store. The watch flow does
  *      not rotate the refresh-token pair — `fetchWsToken` calls
@@ -67,9 +66,14 @@ import type { Writable } from "node:stream";
 
 import {
   computeWsUrl,
-  isClaudeCodePluginContext,
-  parseWatchEnv,
-  watchAccessToken,
+  loadConfigFile,
+  parseCliFlags,
+  redactCliArg,
+  redactToken,
+  resolveBridgeEnv,
+  type BridgeEnv,
+  type CliFlags,
+  type ConfigFile,
 } from "./env.js";
 import { EnvelopeMinter } from "./envelope.js";
 import { EnvValidationError } from "./errors.js";
@@ -111,6 +115,7 @@ export class WatchArgsError extends Error {
 
 export interface WatchArgs {
   readonly topics: readonly string[];
+  readonly flags: CliFlags;
 }
 
 export interface WatchOptions {
@@ -132,11 +137,13 @@ export interface SignalSource {
 }
 
 export function parseWatchArgs(argv: readonly string[]): WatchArgs {
+  const { flags, remaining } = parseCliFlags(argv);
   const topics: string[] = [];
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i];
+  for (let i = 0; i < remaining.length; i += 1) {
+    const arg = remaining[i];
+    if (arg === undefined) continue;
     if (arg === "--topic") {
-      const next = argv[i + 1];
+      const next = remaining[i + 1];
       if (typeof next !== "string" || next.length === 0) {
         throw new WatchArgsError("--topic requires a value (e.g. --topic signals.)");
       }
@@ -145,18 +152,18 @@ export function parseWatchArgs(argv: readonly string[]): WatchArgs {
       continue;
     }
     throw new WatchArgsError(
-      `unknown argument ${JSON.stringify(arg)} — usage: snapper-mcp watch [--topic PREFIX]...`,
+      `unknown argument ${JSON.stringify(redactCliArg(arg))} — usage: snapper-mcp watch [--config PATH] [--topic PREFIX]...`,
     );
   }
   const resolved = topics.length === 0 ? [...DEFAULT_TOPICS] : topics;
   for (const topic of resolved) {
     if (!topic.endsWith(".")) {
       throw new WatchArgsError(
-        `--topic value must end with '.' to address a topic family root (got ${JSON.stringify(topic)})`,
+        `--topic value must end with '.' to address a topic family root (got ${JSON.stringify(redactToken(topic))})`,
       );
     }
   }
-  return { topics: resolved };
+  return { topics: resolved, flags };
 }
 
 function resolveStdout(opt: WatchOptions["stdout"]): JsonlSink {
@@ -203,10 +210,13 @@ interface WatchSetup {
   readonly logger: Logger;
 }
 
-function buildWatchSetup(args: WatchArgs, options: WatchOptions, sink: JsonlSink): WatchSetup {
-  const source = options.source ?? process.env;
-  const logger = createLogger(`${CLIENT_NAME} watch`, source);
-  const env = parseWatchEnv(source);
+function buildWatchSetup(
+  args: WatchArgs,
+  options: WatchOptions,
+  sink: JsonlSink,
+  env: BridgeEnv,
+  logger: Logger,
+): WatchSetup {
   const wsUrl = computeWsUrl(env.baseUrl);
   const store = new TokenStore({ access: env.accessToken, refresh: env.refreshToken });
   const minter = new EnvelopeMinter();
@@ -227,6 +237,8 @@ function buildWatchSetup(args: WatchArgs, options: WatchOptions, sink: JsonlSink
 
 export async function watchMain(options: WatchOptions = {}): Promise<void> {
   const argv = options.argv ?? process.argv.slice(3);
+  const source = options.source ?? process.env;
+  const logger = createLogger(`${CLIENT_NAME} watch`, source);
   let args: WatchArgs;
   try {
     args = parseWatchArgs(argv);
@@ -238,46 +250,19 @@ export async function watchMain(options: WatchOptions = {}): Promise<void> {
   }
   const sink = resolveStdout(options.stdout);
 
-  /*
-   * Plugin-monitor graceful skip.
-   *
-   * Claude Code starts every plugin monitor unconditionally at session
-   * start (no `when` condition exists for "user_config field is set"),
-   * so a plugin user who installs the bridge for the proxy MCP server
-   * but never fills in `SNAPPER_WATCH_ACCESS_TOKEN` would otherwise see
-   * the monitor restart-loop on every session, emitting a "Missing
-   * required environment variable" stderr line each time. Detect that
-   * case explicitly and exit 0 with a single informational stderr line
-   * instead — the proxy MCP server stays unaffected and the operator
-   * can opt in later by setting the field. Standalone hosts (Option 2
-   * / 3 in README) are NOT affected by this branch: neither plugin-
-   * context signal (`CLAUDE_PLUGIN_OPTION_SNAPPER_BASE_URL` /
-   * `CLAUDE_PLUGIN_ROOT`, see `isClaudeCodePluginContext`) is set in
-   * those, so a missing token still throws the hard EnvValidationError
-   * below.
-   */
-  const source = options.source ?? process.env;
-  if (isClaudeCodePluginContext(source) && watchAccessToken(source) === null) {
-    process.stderr.write(
-      `[${CLIENT_NAME} watch] SNAPPER_WATCH_ACCESS_TOKEN is not configured; ` +
-        `plugin monitor staying idle. To enable push-wakeup, mint a long-lived ` +
-        `PAT delegate in Snapper's AI Integration UI and paste its access ` +
-        `token into the "Watch monitor access token" plugin config field, ` +
-        `then restart Claude Code.\n`,
-    );
-    return;
-  }
-
   let setup: WatchSetup;
   try {
-    setup = buildWatchSetup(args, options, sink);
+    const configFile: ConfigFile | null =
+      args.flags.configPath === null ? null : await loadConfigFile(args.flags.configPath, logger);
+    const env = resolveBridgeEnv(source, args.flags, configFile, "watch", logger);
+    setup = buildWatchSetup(args, options, sink, env, logger);
   } catch (err) {
     if (!(err instanceof EnvValidationError)) throw err;
     process.stderr.write(`[${CLIENT_NAME} watch] ${err.message}\n`);
     process.exit(1);
     return;
   }
-  const { client, logger } = setup;
+  const { client } = setup;
 
   const signalSource = resolveSignalSource(options.signalSource);
   const shouldInstall = options.install ?? true;

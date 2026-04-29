@@ -23,7 +23,7 @@ Minimum Node version is `>=22.0.0` (matches Claude Desktop's embedded Node and v
 ## Integration test against a local Snapper instance
 
 ```bash
-# In a separate terminal, boot a local Snapper backend (from the parent monorepo).
+# In a separate terminal, boot a local Snapper backend (e.g. via `make dev-backend` in your Snapper deployment).
 make dev-backend
 
 # Back here, run the manual integration test.
@@ -51,11 +51,11 @@ public repo.
 - **Zero secrets / real IDs.** No real JWTs, wallet/operator/user IDs. Use
   `jwt-placeholder`, `wallet-demo-01`, etc. — these are allowlisted in
   `.gitleaks.toml`.
-- **No paste from proprietary Snapper-core modules.** This repo is MIT-licensed
+- **No paste from upstream private modules.** This repo is MIT-licensed
   and public on GitHub + published on npm. Keep it vendor-neutral.
 - **`.env.example` only.** Never commit a real `.env`.
-- **Multi-model review** is expected for non-trivial changes — matches the
-  parent project's convention.
+- **Reviewer pair is expected for non-trivial changes** — at minimum
+  one human reviewer plus one model-assisted review pass before merge.
 
 The PR template embeds a hygiene checklist; please honour it.
 

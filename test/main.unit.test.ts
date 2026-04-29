@@ -55,7 +55,7 @@ describe("main — in-process lifecycle", () => {
 
   it("happy path: initializes, mirrors capabilities, logs banner without exiting", async () => {
     const [stdioTransport] = InMemoryTransport.createLinkedPair();
-    await main({ source: baseEnv(), stdioTransport, install: false });
+    await main({ source: baseEnv(), argv: [], stdioTransport, install: false });
 
     const stderrText = stderrSpy.mock.calls
       .map((args) => (typeof args[0] === "string" ? args[0] : String(args[0])))
@@ -64,17 +64,100 @@ describe("main — in-process lifecycle", () => {
     expect(stderrText).toContain("snapper");
   });
 
+  it("uses process.env, process.argv, and installs handlers when options are omitted", async () => {
+    const [stdioTransport] = InMemoryTransport.createLinkedPair();
+    const originalArgv = process.argv;
+    const previousBaseUrl = process.env.SNAPPER_BASE_URL;
+    const previousAccess = process.env.SNAPPER_ACCESS_TOKEN;
+    const previousRefresh = process.env.SNAPPER_REFRESH_TOKEN;
+    const previousLogLevel = process.env.SNAPPER_MCP_LOG_LEVEL;
+    const before = { term: process.listenerCount("SIGTERM"), int: process.listenerCount("SIGINT") };
+    process.argv = ["/usr/bin/node", "/usr/local/bin/snapper-mcp"];
+    process.env.SNAPPER_BASE_URL = server.baseUrl.toString();
+    process.env.SNAPPER_ACCESS_TOKEN = "access-jwt";
+    process.env.SNAPPER_REFRESH_TOKEN = "refresh-jwt";
+    process.env.SNAPPER_MCP_LOG_LEVEL = "error";
+    try {
+      await main({ stdioTransport });
+      const after = { term: process.listenerCount("SIGTERM"), int: process.listenerCount("SIGINT") };
+      expect(after.term).toBeGreaterThan(before.term);
+      expect(after.int).toBeGreaterThan(before.int);
+      const extraTerm = after.term - before.term;
+      const extraInt = after.int - before.int;
+      for (let i = 0; i < extraTerm; i += 1) {
+        const listener = process.listeners("SIGTERM").pop();
+        if (listener) process.removeListener("SIGTERM", listener);
+      }
+      for (let i = 0; i < extraInt; i += 1) {
+        const listener = process.listeners("SIGINT").pop();
+        if (listener) process.removeListener("SIGINT", listener);
+      }
+    } finally {
+      process.argv = originalArgv;
+      if (previousBaseUrl === undefined) {
+        delete process.env.SNAPPER_BASE_URL;
+      } else {
+        process.env.SNAPPER_BASE_URL = previousBaseUrl;
+      }
+      if (previousAccess === undefined) {
+        delete process.env.SNAPPER_ACCESS_TOKEN;
+      } else {
+        process.env.SNAPPER_ACCESS_TOKEN = previousAccess;
+      }
+      if (previousRefresh === undefined) {
+        delete process.env.SNAPPER_REFRESH_TOKEN;
+      } else {
+        process.env.SNAPPER_REFRESH_TOKEN = previousRefresh;
+      }
+      if (previousLogLevel === undefined) {
+        delete process.env.SNAPPER_MCP_LOG_LEVEL;
+      } else {
+        process.env.SNAPPER_MCP_LOG_LEVEL = previousLogLevel;
+      }
+    }
+  });
+
   it("exits 1 when env var SNAPPER_BASE_URL is missing", async () => {
     exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
       throw new Error("exit(1)");
     });
     const env = baseEnv({ SNAPPER_BASE_URL: undefined });
-    await expect(main({ source: env, install: false })).rejects.toThrow("exit(1)");
+    await expect(main({ source: env, argv: [], install: false })).rejects.toThrow("exit(1)");
     expect(exitSpy).toHaveBeenCalledWith(1);
     const stderrText = stderrSpy.mock.calls
       .map((args) => (typeof args[0] === "string" ? args[0] : String(args[0])))
       .join("");
     expect(stderrText).toContain("SNAPPER_BASE_URL");
+  });
+
+  it("exits 1 when proxy mode receives an unknown argument", async () => {
+    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
+      throw new Error("exit(1)");
+    });
+    await expect(
+      main({ source: baseEnv(), argv: ["--topic", "signals."], install: false }),
+    ).rejects.toThrow("exit(1)");
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    const stderrText = stderrSpy.mock.calls
+      .map((args) => (typeof args[0] === "string" ? args[0] : String(args[0])))
+      .join("");
+    expect(stderrText).toContain("Unknown argument");
+    expect(stderrText).toContain("--topic");
+  });
+
+  it("redacts JWT-shaped values from unknown proxy arguments", async () => {
+    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
+      throw new Error("exit(1)");
+    });
+    const token = `${"a".repeat(24)}.${"b".repeat(24)}.${"c".repeat(24)}`;
+    await expect(
+      main({ source: baseEnv(), argv: [`--secret=${token}`], install: false }),
+    ).rejects.toThrow("exit(1)");
+    const stderrText = stderrSpy.mock.calls
+      .map((args) => (typeof args[0] === "string" ? args[0] : String(args[0])))
+      .join("");
+    expect(stderrText).toContain("<jwt-");
+    expect(stderrText).not.toContain(token);
   });
 
   it("rethrows non-EnvValidationError failures unchanged", async () => {
@@ -88,7 +171,7 @@ describe("main — in-process lifecycle", () => {
       throw new Error("exit(1)");
     });
     const env = baseEnv({ SNAPPER_BASE_URL: "not-a-url" });
-    await expect(main({ source: env, install: false })).rejects.toThrow("exit(1)");
+    await expect(main({ source: env, argv: [], install: false })).rejects.toThrow("exit(1)");
     expect(exitSpy).toHaveBeenCalledWith(1);
   });
 
@@ -97,7 +180,7 @@ describe("main — in-process lifecycle", () => {
       throw new Error("exit(1)");
     });
     const deadEnv = baseEnv({ SNAPPER_BASE_URL: "http://127.0.0.1:1/api/mcp/" });
-    await expect(main({ source: deadEnv, install: false })).rejects.toThrow();
+    await expect(main({ source: deadEnv, argv: [], install: false })).rejects.toThrow();
     expect(exitSpy).toHaveBeenCalledWith(1);
     const stderrText = stderrSpy.mock.calls
       .map((args) => (typeof args[0] === "string" ? args[0] : String(args[0])))
@@ -108,7 +191,7 @@ describe("main — in-process lifecycle", () => {
   it("installs signal handlers when install=true (default)", async () => {
     const [stdioTransport] = InMemoryTransport.createLinkedPair();
     const before = { term: process.listenerCount("SIGTERM"), int: process.listenerCount("SIGINT") };
-    await main({ source: baseEnv(), stdioTransport, install: true });
+    await main({ source: baseEnv(), argv: [], stdioTransport, install: true });
     const after = { term: process.listenerCount("SIGTERM"), int: process.listenerCount("SIGINT") };
     expect(after.term).toBeGreaterThan(before.term);
     expect(after.int).toBeGreaterThan(before.int);
@@ -134,7 +217,7 @@ describe("main — in-process lifecycle", () => {
         term: process.listenerCount("SIGTERM"),
         int: process.listenerCount("SIGINT"),
       };
-      await main({ source: baseEnv(), stdioTransport, install: true });
+      await main({ source: baseEnv(), argv: [], stdioTransport, install: true });
       process.emit("SIGTERM");
       // Drain runs async; give it a tick.
       await new Promise((resolve) => setImmediate(resolve));
@@ -163,7 +246,7 @@ describe("main — in-process lifecycle", () => {
 
   it("forwards ping requests end-to-end, exercising the proxy closure", async () => {
     const [stdioTransport, clientSideTransport] = InMemoryTransport.createLinkedPair();
-    await main({ source: baseEnv(), stdioTransport, install: false });
+    await main({ source: baseEnv(), argv: [], stdioTransport, install: false });
 
     // Minimal MCP client on the stdio side that issues initialize + ping.
     const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
@@ -181,7 +264,7 @@ describe("main — in-process lifecycle", () => {
       Promise.reject(new Error("broken transport"));
     const before = { term: process.listenerCount("SIGTERM"), int: process.listenerCount("SIGINT") };
     await expect(
-      main({ source: baseEnv(), stdioTransport, install: true }),
+      main({ source: baseEnv(), argv: [], stdioTransport, install: true }),
     ).rejects.toThrow(/failed to attach stdio server transport/);
     const after = { term: process.listenerCount("SIGTERM"), int: process.listenerCount("SIGINT") };
     // Handlers installed, then uninstalled — net zero.
@@ -189,4 +272,3 @@ describe("main — in-process lifecycle", () => {
     expect(after.int).toBe(before.int);
   });
 });
-

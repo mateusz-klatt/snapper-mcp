@@ -11,6 +11,107 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - (next release TBD)
 
+## [0.6.0]
+
+Restores the plugin monitor entry to functional state and corrects
+the long-standing `.mcp-config.json` filename typo. The plugin monitor
+shipped in `0.5.0` was empirically broken in Claude Code 2.1.x — the
+documented `CLAUDE_PLUGIN_OPTION_<KEY>` user_config auto-export does
+not exist for monitor processes (verified by inspecting
+`/proc/<pid>/environ` of running plugin subprocesses). `0.6.0`
+replaces the env-var auto-export reliance with a `--config=PATH`
+flag plus a proxy-side self-seed step: the proxy MCP server, which
+DOES receive `${user_config.X}` substitution via `mcpServers.env`,
+writes a JSON file to `${CLAUDE_PLUGIN_DATA}/env.json` (mode 0600,
+atomic) at startup; the monitor reads that file via `--config=`. The
+plugin manifest's `monitors[]` entry uses the same substitution
+syntax as `mcpServers[]` for the file path, which IS supported in
+both spots, even though the `env` block is silently rejected for
+`monitors[]`.
+
+### Added
+
+- `--config=PATH` flag accepted by both the proxy entrypoint and the
+  `watch` subcommand. Loads a JSON file with the same key set as the
+  existing env-var contract: `SNAPPER_BASE_URL`,
+  `SNAPPER_ACCESS_TOKEN`, `SNAPPER_REFRESH_TOKEN` (optional),
+  `SNAPPER_WATCH_ACCESS_TOKEN` (optional). Missing keys fall through
+  to lower rungs of the resolution chain.
+- Per-key flag overrides: `--access-token=VALUE`, `--base-url=VALUE`,
+  `--refresh-token=VALUE`, `--watch-access-token=VALUE`. Both
+  `--flag=value` and `--flag value` forms accepted. Last duplicate
+  wins. Operator-facing escape hatches for testing or one-off runs.
+- Per-key resolution chain (highest wins): CLI flag → `--config=`
+  file → environment variable. Watch mode disallows file/env
+  fallback from `SNAPPER_WATCH_ACCESS_TOKEN` to
+  `SNAPPER_ACCESS_TOKEN` (only the explicit `--access-token=` CLI
+  flag may stand in for the watch token, as a deliberate escape
+  hatch).
+- Proxy startup self-seeds `${CLAUDE_PLUGIN_DATA}/env.json` when
+  that variable is set in the environment. Atomic write
+  (`tmp + rename`), mode 0600, always overwrites — no staleness
+  check. The seeded file carries all four key values (empty string
+  for unset optionals). On write failure (`EACCES` / `EROFS` /
+  `ENOSPC`), the proxy logs a warning and continues — the proxy
+  itself does not need the file, only downstream monitor processes
+  do.
+- Token-shape redaction in error messages (`<jwt-NN-chars-...>`
+  format) so accidentally-typed flag values like `--bogus=eyJ...`
+  do not leak into stderr.
+- File hardening: `--config=` rejects world-writable files,
+  non-regular files (symlink to `/dev/null`, named pipes,
+  directories), and files larger than 1 MiB. Group/world-readable
+  files emit a warning but continue (operator's choice).
+
+### Fixed
+
+- `.mcp-config.json` typo across stderr error messages and README.
+  That filename does not exist in any documented MCP host. The
+  canonical names are `.mcp.json` for Claude Code (project-level or
+  user-level) and `claude_desktop_config.json` for Claude Desktop
+  (OS-specific paths). All five sites updated.
+- Plugin monitor entry now actually functional in Claude Code
+  2.1.x — see header note above.
+
+### Breaking
+
+- `EnvValidationError.message` strings updated for the
+  `.mcp-config.json` → `.mcp.json` rename. Operator-facing only;
+  no automation should be parsing these strings.
+- Internal exports `isClaudeCodePluginContext` and
+  `watchAccessToken` removed from `src/env.ts`. These were never
+  re-exported from the package entrypoint; only the package's own
+  test files referenced them. Public surface unchanged.
+- Plugin monitor graceful-skip-when-blank-watch-token REMOVED. In
+  `0.5.0`, when a Claude Code plugin operator left
+  `SNAPPER_WATCH_ACCESS_TOKEN` blank, the monitor exited 0 with a
+  stderr info message ("plugin monitor staying idle"). In `0.6.0`,
+  the monitor either succeeds or hard-errors with an actionable
+  message. **Two operator migration paths:**
+
+  - **Primary path (operators who want the monitor):** populate
+    `SNAPPER_WATCH_ACCESS_TOKEN` in the plugin user_config.
+    Long-lived single-delegate operators paste the same token as
+    `SNAPPER_ACCESS_TOKEN` (no rotation, no race). Rotating
+    delegate operators mint a SECOND long-lived delegate
+    explicitly for the monitor in the Snapper AI Integration UI.
+  - **Fallback path (operators who don't want the monitor):**
+    disable the monitor at the Claude Code plugin level. Either
+    flip `enabledPlugins.snapper-mcp@... = false` in
+    `~/.claude/settings.json` for the whole plugin, or remove the
+    `monitors[]` array from the local plugin manifest cache for
+    proxy-only.
+
+### Migration
+
+`v0.5.x` operators with env-var-only setups (Claude Desktop,
+systemd, plain CLI) keep working unchanged after
+`npm i -g @mateusz-klatt/snapper-mcp@0.6.0` — the env-var rung of
+the new resolution chain still resolves credentials. Claude Code
+plugin operators who left `SNAPPER_WATCH_ACCESS_TOKEN` blank in
+`0.5.0` need to take one of the two actions in `### Breaking`
+above before restarting Claude Code.
+
 ## [0.5.0]
 
 Plugin-surface release that restores the deferred plugin monitor
