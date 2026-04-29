@@ -157,14 +157,18 @@ describe("loadConfigFile", () => {
     await expect(loadConfigFile(filePath, testLogger())).rejects.toBeInstanceOf(EnvValidationError);
   });
 
-  it("throws when the path resolves to a non-regular file", async () => {
-    if (process.platform === "win32") return;
-    const root = await tempRoot();
-    roots.push(root);
-    const filePath = path.join(root, "device-link");
-    await symlink("/dev/null", filePath);
-    await expect(loadConfigFile(filePath, testLogger())).rejects.toBeInstanceOf(EnvValidationError);
-  });
+  it.runIf(process.platform !== "win32")(
+    "throws when a POSIX symlink target resolves to a non-regular file",
+    async () => {
+      const root = await tempRoot();
+      roots.push(root);
+      const filePath = path.join(root, "device-link");
+      await symlink("/dev/null", filePath);
+      await expect(loadConfigFile(filePath, testLogger())).rejects.toBeInstanceOf(
+        EnvValidationError,
+      );
+    },
+  );
 
   it("warns but loads when a config file is group-readable on POSIX", async () => {
     const root = await tempRoot();
