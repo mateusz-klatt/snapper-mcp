@@ -6,8 +6,6 @@ const EMPTY_FLAGS: CliFlags = {
   configPath: null,
   accessToken: null,
   baseUrl: null,
-  refreshToken: null,
-  watchAccessToken: null,
 };
 
 describe("parseCliFlags", () => {
@@ -28,15 +26,11 @@ describe("parseCliFlags", () => {
       "--config=/tmp/env.json",
       "--access-token=access",
       "--base-url=https://snapper.example.com/api/mcp",
-      "--refresh-token=refresh",
-      "--watch-access-token=watch",
     ]);
     expect(result.flags).toEqual({
       configPath: "/tmp/env.json",
       accessToken: "access",
       baseUrl: "https://snapper.example.com/api/mcp",
-      refreshToken: "refresh",
-      watchAccessToken: "watch",
     });
     expect(result.remaining).toEqual([]);
   });
@@ -49,17 +43,11 @@ describe("parseCliFlags", () => {
       "access",
       "--base-url",
       "https://snapper.example.com/api/mcp",
-      "--refresh-token",
-      "refresh",
-      "--watch-access-token",
-      "watch",
     ]);
     expect(result.flags).toEqual({
       configPath: "/tmp/env.json",
       accessToken: "access",
       baseUrl: "https://snapper.example.com/api/mcp",
-      refreshToken: "refresh",
-      watchAccessToken: "watch",
     });
     expect(result.remaining).toEqual([]);
   });

@@ -18,8 +18,6 @@ export async function seedConfigFileIfPluginContext(
     {
       SNAPPER_BASE_URL: env.baseUrl.toString(),
       SNAPPER_ACCESS_TOKEN: env.accessToken,
-      SNAPPER_REFRESH_TOKEN: env.refreshToken ?? "",
-      SNAPPER_WATCH_ACCESS_TOKEN: env.watchAccessToken ?? "",
     },
     null,
     2,

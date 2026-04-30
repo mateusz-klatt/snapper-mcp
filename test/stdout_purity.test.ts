@@ -24,7 +24,6 @@ async function runBridgeInitialize(
       ...process.env,
       SNAPPER_BASE_URL: baseUrl.toString(),
       SNAPPER_ACCESS_TOKEN: "test-access-jwt",
-      SNAPPER_REFRESH_TOKEN: "test-refresh-jwt",
       SNAPPER_MCP_LOG_LEVEL: "error",
       ...envOverrides,
     },

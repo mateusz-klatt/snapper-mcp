@@ -55,24 +55,27 @@ describe("plugin manifest", () => {
     expect(args).toContain(`@mateusz-klatt/snapper-mcp@${pkg.version}`);
   });
 
-  it("declares SNAPPER_WATCH_ACCESS_TOKEN as an optional, sensitive userConfig field", () => {
-    const field = manifest.userConfig["SNAPPER_WATCH_ACCESS_TOKEN"];
-    expect(field).toBeDefined();
-    expect(field.required).toBe(false);
-    expect(field.sensitive).toBe(true);
+  it("declares exactly two userConfig fields", () => {
+    expect(Object.keys(manifest.userConfig).sort((a, b) => a.localeCompare(b))).toEqual([
+      "SNAPPER_ACCESS_TOKEN",
+      "SNAPPER_BASE_URL",
+    ]);
   });
 
-  it("keeps SNAPPER_BASE_URL + SNAPPER_ACCESS_TOKEN as required userConfig fields", () => {
+  it("declares SNAPPER_BASE_URL + SNAPPER_ACCESS_TOKEN as required userConfig fields", () => {
     expect(manifest.userConfig["SNAPPER_BASE_URL"].required).toBe(true);
     expect(manifest.userConfig["SNAPPER_ACCESS_TOKEN"].required).toBe(true);
+    expect(manifest.userConfig["SNAPPER_ACCESS_TOKEN"].sensitive).toBe(true);
   });
 
-  it("passes all configured credential fields to the proxy MCP server", () => {
+  it("passes both credential fields to the proxy MCP server (and only those)", () => {
     const env = manifest.mcpServers["snapper"].env;
     expect(env["SNAPPER_BASE_URL"]).toBe("${user_config.SNAPPER_BASE_URL}");
     expect(env["SNAPPER_ACCESS_TOKEN"]).toBe("${user_config.SNAPPER_ACCESS_TOKEN}");
-    expect(env["SNAPPER_REFRESH_TOKEN"]).toBe("${user_config.SNAPPER_REFRESH_TOKEN}");
-    expect(env["SNAPPER_WATCH_ACCESS_TOKEN"]).toBe("${user_config.SNAPPER_WATCH_ACCESS_TOKEN}");
+    expect(Object.keys(env).sort((a, b) => a.localeCompare(b))).toEqual([
+      "SNAPPER_ACCESS_TOKEN",
+      "SNAPPER_BASE_URL",
+    ]);
   });
 
   it("ships a single monitor entry with all required fields", () => {
@@ -104,7 +107,6 @@ describe("plugin manifest", () => {
     const monitor = manifest.monitors[0];
     expect(monitor.command).not.toContain("${user_config.");
     expect(monitor.command).not.toContain("SNAPPER_ACCESS_TOKEN");
-    expect(monitor.command).not.toContain("SNAPPER_WATCH_ACCESS_TOKEN");
   });
 
   it("does NOT shell-wrap or env-prefix the monitor command", () => {

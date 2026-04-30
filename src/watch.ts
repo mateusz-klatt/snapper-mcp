@@ -24,15 +24,11 @@
  *
  *   1. Parse argv → `parseWatchArgs`.
  *   2. Resolve credentials from CLI flags, an optional config file,
- *      then environment variables. Watch mode keeps refresh-token
- *      rotation disabled so it does not contend with a sibling proxy
- *      process.
+ *      then environment variables.
  *   3. Construct `TokenStore` + bind a `fetchWsToken` closure that
- *      reads the access bearer from the store. The watch flow does
- *      not rotate the refresh-token pair — `fetchWsToken` calls
- *      the dedicated `POST /api/auth/ws_token` endpoint with the
- *      access bearer only — so the watch session does not contend
- *      with a sibling proxy MCP server on a shared refresh JTI.
+ *      reads the access bearer from the store. `fetchWsToken` calls
+ *      `POST /api/auth/ws_token` to mint a one-shot WebSocket token
+ *      from the access bearer's session.
  *   4. Construct `EnvelopeMinter` (one per process — a stable
  *      session_id across the whole watch run lets server-side gap
  *      detection observe a clean per-client provenance).
@@ -218,7 +214,7 @@ function buildWatchSetup(
   logger: Logger,
 ): WatchSetup {
   const wsUrl = computeWsUrl(env.baseUrl);
-  const store = new TokenStore({ access: env.accessToken, refresh: env.refreshToken });
+  const store = new TokenStore({ access: env.accessToken });
   const minter = new EnvelopeMinter();
   const fetchToken = (): Promise<WsTokenResult> => fetchWsToken(env.baseUrl, store, logger);
   const wsOptions: WsClientOptions = {
@@ -254,7 +250,7 @@ export async function watchMain(options: WatchOptions = {}): Promise<void> {
   try {
     const configFile: ConfigFile | null =
       args.flags.configPath === null ? null : await loadConfigFile(args.flags.configPath, logger);
-    const env = resolveBridgeEnv(source, args.flags, configFile, "watch", logger);
+    const env = resolveBridgeEnv(source, args.flags, configFile, logger);
     setup = buildWatchSetup(args, options, sink, env, logger);
   } catch (err) {
     if (!(err instanceof EnvValidationError)) throw err;

@@ -3,8 +3,8 @@
  *
  * Sequence
  *   1. parseEnv()  — fail-fast with stderr + exit 1 on missing/invalid.
- *   2. TokenStore({access, refresh}).
- *   3. bridgeFetch = createBridgeFetch(store, performRefresh, logger).
+ *   2. TokenStore({access}).
+ *   3. bridgeFetch = createBridgeFetch(store, logger).
  *   4. StreamableHTTPClientTransport(baseUrl, {fetch: bridgeFetch}) —
  *      NO authProvider; SDK v1.29's authProvider is OAuthClientProvider
  *      (full OAuth flow) and we only need a bearer-token fetch hook.
@@ -33,7 +33,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
-import { createBridgeFetch, makePerformRefresh } from "./bridge_fetch.js";
+import { createBridgeFetch } from "./bridge_fetch.js";
 import { BridgeStartupError, EnvValidationError } from "./errors.js";
 import { parseCliFlags, parseEnv, redactCliArg, type BridgeEnv } from "./env.js";
 import { createLogger } from "./logger.js";
@@ -77,7 +77,7 @@ function rejectUnknownProxyArgs(argv: readonly string[]): void {
   if (remaining.length === 0) return;
   const rendered = remaining.map((arg) => JSON.stringify(redactCliArg(arg))).join(", ");
   throw new EnvValidationError(
-    `Unknown argument ${rendered} — usage: snapper-mcp [--config PATH] [--base-url URL] [--access-token VALUE] [--refresh-token VALUE] [--watch-access-token VALUE]`,
+    `Unknown argument ${rendered} — usage: snapper-mcp [--config PATH] [--base-url URL] [--access-token VALUE]`,
   );
 }
 
@@ -99,9 +99,8 @@ export async function main(options: MainOptions = {}): Promise<void> {
 
   await seedConfigFileIfPluginContext(env, source, logger);
 
-  const store = new TokenStore({ access: env.accessToken, refresh: env.refreshToken });
-  const performRefresh = makePerformRefresh(env.baseUrl, logger);
-  const bridgeFetch = createBridgeFetch(store, performRefresh, logger);
+  const store = new TokenStore({ access: env.accessToken });
+  const bridgeFetch = createBridgeFetch(store, logger);
 
   const httpTransport = new StreamableHTTPClientTransport(env.baseUrl, { fetch: bridgeFetch });
   const httpClient = new Client(

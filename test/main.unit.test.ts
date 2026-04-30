@@ -47,7 +47,6 @@ describe("main — in-process lifecycle", () => {
     return {
       SNAPPER_BASE_URL: server.baseUrl.toString(),
       SNAPPER_ACCESS_TOKEN: "access-jwt",
-      SNAPPER_REFRESH_TOKEN: "refresh-jwt",
       SNAPPER_MCP_LOG_LEVEL: "debug",
       ...overrides,
     } as NodeJS.ProcessEnv;
@@ -69,13 +68,11 @@ describe("main — in-process lifecycle", () => {
     const originalArgv = process.argv;
     const previousBaseUrl = process.env.SNAPPER_BASE_URL;
     const previousAccess = process.env.SNAPPER_ACCESS_TOKEN;
-    const previousRefresh = process.env.SNAPPER_REFRESH_TOKEN;
     const previousLogLevel = process.env.SNAPPER_MCP_LOG_LEVEL;
     const before = { term: process.listenerCount("SIGTERM"), int: process.listenerCount("SIGINT") };
     process.argv = ["/usr/bin/node", "/usr/local/bin/snapper-mcp"];
     process.env.SNAPPER_BASE_URL = server.baseUrl.toString();
     process.env.SNAPPER_ACCESS_TOKEN = "access-jwt";
-    process.env.SNAPPER_REFRESH_TOKEN = "refresh-jwt";
     process.env.SNAPPER_MCP_LOG_LEVEL = "error";
     try {
       await main({ stdioTransport });
@@ -103,11 +100,6 @@ describe("main — in-process lifecycle", () => {
         delete process.env.SNAPPER_ACCESS_TOKEN;
       } else {
         process.env.SNAPPER_ACCESS_TOKEN = previousAccess;
-      }
-      if (previousRefresh === undefined) {
-        delete process.env.SNAPPER_REFRESH_TOKEN;
-      } else {
-        process.env.SNAPPER_REFRESH_TOKEN = previousRefresh;
       }
       if (previousLogLevel === undefined) {
         delete process.env.SNAPPER_MCP_LOG_LEVEL;

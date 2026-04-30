@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { RefreshFailedError } from "../src/errors.js";
+import { AuthFailedError } from "../src/errors.js";
 import { createLogger } from "../src/logger.js";
 import { TokenStore } from "../src/token_store.js";
 import { fetchWsToken } from "../src/ws_token.js";
@@ -11,8 +11,8 @@ function makeSilentLogger() {
   return createLogger({ prefix: "test", level: "error", timestamps: false });
 }
 
-function makeStore(access = "access-token", refresh: string | null = null): TokenStore {
-  return new TokenStore({ access, refresh });
+function makeStore(access = "access-token"): TokenStore {
+  return new TokenStore({ access });
 }
 
 function makeResponse(status: number, body: unknown = null): Response {
@@ -80,28 +80,15 @@ describe("fetchWsToken — URL + header contract", () => {
     );
   });
 
-  it("does NOT modify the TokenStore on success (no rotation)", async () => {
+  it("does NOT modify the TokenStore on success", async () => {
     fetchMock.mockResolvedValueOnce(makeResponse(200, wsTokenEnvelope()));
-    const store = makeStore("untouched-access", "untouched-refresh");
+    const store = makeStore("untouched-access");
     await fetchWsToken(
       new URL("http://localhost:8000/api/mcp"),
       store,
       makeSilentLogger(),
     );
     expect(store.accessToken()).toBe("untouched-access");
-    expect(store.current().refresh).toBe("untouched-refresh");
-  });
-
-  it("supports access-only (PAT-mode) delegates without a refresh credential", async () => {
-    fetchMock.mockResolvedValueOnce(makeResponse(200, wsTokenEnvelope()));
-    const store = makeStore("pat-access", null);
-    const result = await fetchWsToken(
-      new URL("http://localhost:8000/api/mcp"),
-      store,
-      makeSilentLogger(),
-    );
-    expect(result.ws_token).toBe("ws-token-abc");
-    expect(store.hasRefreshToken()).toBe(false);
   });
 });
 
@@ -160,7 +147,7 @@ describe("fetchWsToken — HTTP failure mapping", () => {
     vi.unstubAllGlobals();
   });
 
-  it("maps 401 to RefreshFailedError(ws_token rejected (401))", async () => {
+  it("maps 401 to AuthFailedError(ws_token rejected (401))", async () => {
     fetchMock.mockResolvedValueOnce(makeResponse(401, { detail: "Authentication required" }));
     await expect(
       fetchWsToken(
@@ -169,13 +156,13 @@ describe("fetchWsToken — HTTP failure mapping", () => {
         makeSilentLogger(),
       ),
     ).rejects.toMatchObject({
-      name: "RefreshFailedError",
+      name: "AuthFailedError",
       status: 401,
       message: expect.stringContaining("rejected (401)"),
     });
   });
 
-  it("maps 429 to RefreshFailedError(ws_token rate-limited)", async () => {
+  it("maps 429 to AuthFailedError(ws_token rate-limited)", async () => {
     fetchMock.mockResolvedValueOnce(makeResponse(429, { detail: "rate-limit exceeded" }));
     await expect(
       fetchWsToken(
@@ -184,13 +171,13 @@ describe("fetchWsToken — HTTP failure mapping", () => {
         makeSilentLogger(),
       ),
     ).rejects.toMatchObject({
-      name: "RefreshFailedError",
+      name: "AuthFailedError",
       status: 429,
       message: expect.stringContaining("rate-limited"),
     });
   });
 
-  it("maps 5xx to RefreshFailedError(ws_token server error)", async () => {
+  it("maps 5xx to AuthFailedError(ws_token server error)", async () => {
     fetchMock.mockResolvedValueOnce(makeResponse(503));
     await expect(
       fetchWsToken(
@@ -199,13 +186,13 @@ describe("fetchWsToken — HTTP failure mapping", () => {
         makeSilentLogger(),
       ),
     ).rejects.toMatchObject({
-      name: "RefreshFailedError",
+      name: "AuthFailedError",
       status: 503,
       message: expect.stringContaining("server error"),
     });
   });
 
-  it("maps non-2xx non-401/429/5xx (e.g. 404) to RefreshFailedError(ws_token unexpected status)", async () => {
+  it("maps non-2xx non-401/429/5xx (e.g. 404) to AuthFailedError(ws_token unexpected status)", async () => {
     fetchMock.mockResolvedValueOnce(makeResponse(404));
     await expect(
       fetchWsToken(
@@ -214,7 +201,7 @@ describe("fetchWsToken — HTTP failure mapping", () => {
         makeSilentLogger(),
       ),
     ).rejects.toMatchObject({
-      name: "RefreshFailedError",
+      name: "AuthFailedError",
       status: 404,
       message: expect.stringContaining("unexpected status"),
     });
@@ -233,7 +220,7 @@ describe("fetchWsToken — transport failure mapping", () => {
     vi.unstubAllGlobals();
   });
 
-  it("maps a generic network error to RefreshFailedError(ws_token network error)", async () => {
+  it("maps a generic network error to AuthFailedError(ws_token network error)", async () => {
     fetchMock.mockRejectedValueOnce(new Error("ECONNREFUSED"));
     await expect(
       fetchWsToken(
@@ -242,13 +229,13 @@ describe("fetchWsToken — transport failure mapping", () => {
         makeSilentLogger(),
       ),
     ).rejects.toMatchObject({
-      name: "RefreshFailedError",
+      name: "AuthFailedError",
       status: 0,
       message: expect.stringContaining("network error"),
     });
   });
 
-  it("maps an AbortError to RefreshFailedError(ws_token timeout after 10s)", async () => {
+  it("maps an AbortError to AuthFailedError(ws_token timeout after 10s)", async () => {
     const abortErr = new Error("aborted");
     abortErr.name = "AbortError";
     fetchMock.mockRejectedValueOnce(abortErr);
@@ -259,7 +246,7 @@ describe("fetchWsToken — transport failure mapping", () => {
         makeSilentLogger(),
       ),
     ).rejects.toMatchObject({
-      name: "RefreshFailedError",
+      name: "AuthFailedError",
       status: 0,
       message: expect.stringContaining("timeout after 10s"),
     });
@@ -285,7 +272,7 @@ describe("fetchWsToken — transport failure mapping", () => {
       ).catch((err: unknown) => err);
       await vi.advanceTimersByTimeAsync(10_000);
       await expect(promise).resolves.toMatchObject({
-        name: "RefreshFailedError",
+        name: "AuthFailedError",
         message: expect.stringContaining("timeout after 10s"),
       });
     } finally {
@@ -306,7 +293,7 @@ describe("fetchWsToken — payload validation", () => {
     vi.unstubAllGlobals();
   });
 
-  it("rejects a non-JSON 200 body with RefreshFailedError(ws_token response malformed: not JSON)", async () => {
+  it("rejects a non-JSON 200 body with AuthFailedError(ws_token response malformed: not JSON)", async () => {
     const response = new Response("<html>not-json</html>", {
       status: 200,
       headers: { "Content-Type": "text/html" },
@@ -319,7 +306,7 @@ describe("fetchWsToken — payload validation", () => {
         makeSilentLogger(),
       ),
     ).rejects.toMatchObject({
-      name: "RefreshFailedError",
+      name: "AuthFailedError",
       message: expect.stringContaining("not JSON"),
     });
   });
@@ -424,6 +411,6 @@ describe("fetchWsToken — payload validation", () => {
         makeStore(),
         makeSilentLogger(),
       ),
-    ).rejects.toBeInstanceOf(RefreshFailedError);
+    ).rejects.toBeInstanceOf(AuthFailedError);
   });
 });

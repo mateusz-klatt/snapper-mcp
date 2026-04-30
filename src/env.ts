@@ -2,7 +2,7 @@
  * Credential parsing + URL derivation for the bridge.
  *
  * Runtime credentials resolve per key from CLI flags, an optional JSON
- * config file, then the legacy SNAPPER_* environment variables. Required
+ * config file, then the SNAPPER_* environment variables. Required
  * failures name the missing key so MCP hosts surface actionable startup
  * diagnostics without exposing token values.
  */
@@ -26,39 +26,26 @@ export class EnvValidationError extends Error {
 export interface BridgeEnv {
   readonly baseUrl: URL;
   readonly accessToken: string;
-  readonly refreshToken: string | null;
-  readonly watchAccessToken: string | null;
 }
 
 export interface CliFlags {
   readonly configPath: string | null;
   readonly accessToken: string | null;
   readonly baseUrl: string | null;
-  readonly refreshToken: string | null;
-  readonly watchAccessToken: string | null;
 }
 
 export interface ConfigFile {
   readonly SNAPPER_BASE_URL?: string;
   readonly SNAPPER_ACCESS_TOKEN?: string;
-  readonly SNAPPER_REFRESH_TOKEN?: string;
-  readonly SNAPPER_WATCH_ACCESS_TOKEN?: string;
 }
 
 const REQUIRED_VARS = ["SNAPPER_BASE_URL", "SNAPPER_ACCESS_TOKEN"] as const;
-const OPTIONAL_VARS = ["SNAPPER_REFRESH_TOKEN", "SNAPPER_WATCH_ACCESS_TOKEN"] as const;
-const CONFIG_KEYS = [
-  "SNAPPER_BASE_URL",
-  "SNAPPER_ACCESS_TOKEN",
-  "SNAPPER_REFRESH_TOKEN",
-  "SNAPPER_WATCH_ACCESS_TOKEN",
-] as const;
+const CONFIG_KEYS = ["SNAPPER_BASE_URL", "SNAPPER_ACCESS_TOKEN"] as const;
 const CONFIG_FILE_MAX_BYTES = 1024 * 1024;
 const CONFIG_FILE_RETRIES = 3;
 const CONFIG_FILE_RETRY_DELAY_MS = 500;
 
 type ConfigKey = (typeof CONFIG_KEYS)[number];
-type BridgeMode = "proxy" | "watch";
 type CliFlagKey = keyof CliFlags;
 type MutableCliFlags = Record<CliFlagKey, string | null>;
 
@@ -66,16 +53,12 @@ const EMPTY_FLAGS: CliFlags = {
   configPath: null,
   accessToken: null,
   baseUrl: null,
-  refreshToken: null,
-  watchAccessToken: null,
 };
 
 const FLAG_NAMES: ReadonlyMap<string, CliFlagKey> = new Map([
   ["--config", "configPath"],
   ["--access-token", "accessToken"],
   ["--base-url", "baseUrl"],
-  ["--refresh-token", "refreshToken"],
-  ["--watch-access-token", "watchAccessToken"],
 ]);
 
 const noopLoggerMethod = (): undefined => undefined;
@@ -211,9 +194,11 @@ function assertConfigFileHardening(path: string, stats: Stats, logger: Logger): 
     throw new EnvValidationError(`Config file ${path} exceeds the 1 MiB size limit.`);
   }
   if (process.platform === "win32") {
-    // POSIX `stats.mode` permission bits do not map cleanly to NTFS ACLs.
-    // Skip the mode-based hardening checks on Windows; rely on file
-    // ownership / ACLs surfacing through `readFile` failures instead.
+    /*
+     * POSIX `stats.mode` permission bits do not map cleanly to NTFS ACLs.
+     * Skip the mode-based hardening checks on Windows; rely on file
+     * ownership / ACLs surfacing through `readFile` failures instead.
+     */
     return;
   }
   if ((stats.mode & 0o002) !== 0) {
@@ -315,7 +300,6 @@ export function resolveBridgeEnv(
   source: NodeJS.ProcessEnv,
   flags: CliFlags,
   configFile: ConfigFile | null,
-  mode: BridgeMode,
   logger: Logger = NOOP_LOGGER,
 ): BridgeEnv {
   const configLoaded = configFile !== null;
@@ -338,82 +322,40 @@ export function resolveBridgeEnv(
     },
   );
 
-  const accessCandidates: readonly [string, string | null | undefined][] =
-    mode === "watch"
-      ? [
-          [flagSource("--watch-access-token"), flags.watchAccessToken],
-          [flagSource("--access-token"), flags.accessToken],
-          [
-            configSource("SNAPPER_WATCH_ACCESS_TOKEN"),
-            configValue(configFile, "SNAPPER_WATCH_ACCESS_TOKEN"),
-          ],
-          [envSource("SNAPPER_WATCH_ACCESS_TOKEN"), envValue(source, "SNAPPER_WATCH_ACCESS_TOKEN")],
-        ]
-      : [
-          [flagSource("--access-token"), flags.accessToken],
-          [configSource("SNAPPER_ACCESS_TOKEN"), configValue(configFile, "SNAPPER_ACCESS_TOKEN")],
-          [envSource("SNAPPER_ACCESS_TOKEN"), envValue(source, "SNAPPER_ACCESS_TOKEN")],
-        ];
-  const accessVariable: ConfigKey =
-    mode === "watch" ? "SNAPPER_WATCH_ACCESS_TOKEN" : "SNAPPER_ACCESS_TOKEN";
   const access = requireResolved(
-    resolveFirst(accessCandidates, logger, accessVariable),
+    resolveFirst(
+      [
+        [flagSource("--access-token"), flags.accessToken],
+        [configSource("SNAPPER_ACCESS_TOKEN"), configValue(configFile, "SNAPPER_ACCESS_TOKEN")],
+        [envSource("SNAPPER_ACCESS_TOKEN"), envValue(source, "SNAPPER_ACCESS_TOKEN")],
+      ],
+      logger,
+      "SNAPPER_ACCESS_TOKEN",
+    ),
     {
-      variable: accessVariable,
-      flagNames: mode === "watch" ? ["--watch-access-token", "--access-token"] : ["--access-token"],
-      envNames: [accessVariable],
+      variable: "SNAPPER_ACCESS_TOKEN",
+      flagNames: ["--access-token"],
+      envNames: ["SNAPPER_ACCESS_TOKEN"],
       configPath: flags.configPath,
       configLoaded,
     },
   );
 
-  const refreshToken =
-    mode === "watch"
-      ? null
-      : resolveFirst(
-          [
-            [flagSource("--refresh-token"), flags.refreshToken],
-            [configSource("SNAPPER_REFRESH_TOKEN"), configValue(configFile, "SNAPPER_REFRESH_TOKEN")],
-            [envSource("SNAPPER_REFRESH_TOKEN"), envValue(source, "SNAPPER_REFRESH_TOKEN")],
-          ],
-          logger,
-          "SNAPPER_REFRESH_TOKEN",
-        ).value;
-
-  const watchAccessToken =
-    mode === "watch"
-      ? access
-      : resolveFirst(
-          [
-            [flagSource("--watch-access-token"), flags.watchAccessToken],
-            [
-              configSource("SNAPPER_WATCH_ACCESS_TOKEN"),
-              configValue(configFile, "SNAPPER_WATCH_ACCESS_TOKEN"),
-            ],
-            [envSource("SNAPPER_WATCH_ACCESS_TOKEN"), envValue(source, "SNAPPER_WATCH_ACCESS_TOKEN")],
-          ],
-          logger,
-          "SNAPPER_WATCH_ACCESS_TOKEN",
-        ).value;
-
   return {
     baseUrl: normalizeBridgeUrl(base),
     accessToken: access,
-    refreshToken,
-    watchAccessToken,
   };
 }
 
 async function parseBridgeEnv(
   source: NodeJS.ProcessEnv,
   argv: readonly string[],
-  mode: BridgeMode,
   logger: Logger,
 ): Promise<BridgeEnv> {
   const { flags } = parseCliFlags(argv);
   const configFile =
     flags.configPath === null ? null : await loadConfigFile(flags.configPath, logger);
-  return resolveBridgeEnv(source, flags, configFile, mode, logger);
+  return resolveBridgeEnv(source, flags, configFile, logger);
 }
 
 export async function parseEnv(
@@ -421,7 +363,7 @@ export async function parseEnv(
   argv: readonly string[] = process.argv.slice(2),
   logger: Logger = NOOP_LOGGER,
 ): Promise<BridgeEnv> {
-  return parseBridgeEnv(source, argv, "proxy", logger);
+  return parseBridgeEnv(source, argv, logger);
 }
 
 export async function parseWatchEnv(
@@ -429,37 +371,24 @@ export async function parseWatchEnv(
   argv: readonly string[] = process.argv.slice(3),
   logger: Logger = NOOP_LOGGER,
 ): Promise<BridgeEnv> {
-  return parseBridgeEnv(source, argv, "watch", logger);
-}
-
-export function computeRefreshUrl(baseUrl: URL): URL {
-  const refresh = new URL("/api/auth/refresh", baseUrl.origin);
-  refresh.searchParams.set("return_tokens", "true");
-  return refresh;
+  return parseBridgeEnv(source, argv, logger);
 }
 
 /**
  * Derive the dedicated ws_token-issuance endpoint URL from the
  * validated `/api/mcp` base URL.
  *
- * The Snapper backend exposes `POST /api/auth/ws_token` so a
- * long-running watch client can mint one-shot WebSocket tokens via
- * its access bearer WITHOUT rotating the shared refresh-token pair.
- * That decoupling lets a host-level watch process run alongside the
- * proxy MCP server against the same delegate's access bearer
- * without the watch flow touching `/api/auth/refresh`.
- *
- * Returns a URL on the same origin as `baseUrl`, mirrors the
- * `computeRefreshUrl` shape exactly so error mapping / logging in
- * the call sites stays uniform.
+ * The Snapper backend exposes `POST /api/auth/ws_token` which mints
+ * a one-shot WebSocket token from the access bearer's session.
+ * Returns a URL on the same origin as `baseUrl`.
  */
 export function computeWsTokenUrl(baseUrl: URL): URL {
   return new URL("/api/auth/ws_token", baseUrl.origin);
 }
 
 /**
- * Derive the WS endpoint URL for the upcoming `snapper-mcp watch`
- * subcommand from the validated `/api/mcp` base URL.
+ * Derive the WS endpoint URL for the `snapper-mcp watch` subcommand
+ * from the validated `/api/mcp` base URL.
  *
  * Rejects any base URL whose pathname is not exactly `/api/mcp`
  * (with or without a trailing slash). This prevents two foot-guns:
@@ -506,4 +435,3 @@ export function computeWsUrl(baseUrl: URL): URL {
 }
 
 export const REQUIRED_ENV_VARS: readonly string[] = REQUIRED_VARS;
-export const OPTIONAL_ENV_VARS: readonly string[] = OPTIONAL_VARS;

@@ -30,7 +30,6 @@ make dev-backend
 # The test is NOT in the default CI gate — it requires a live local backend.
 SNAPPER_BASE_URL=http://localhost:8000/api/mcp \
   SNAPPER_ACCESS_TOKEN=$(...) \
-  SNAPPER_REFRESH_TOKEN=$(...) \
   npx vitest run test/integration
 ```
 

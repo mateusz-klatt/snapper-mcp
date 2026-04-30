@@ -26,7 +26,6 @@ function spawnBridge(
       ...process.env,
       SNAPPER_BASE_URL: server.baseUrl.toString(),
       SNAPPER_ACCESS_TOKEN: "test-access",
-      SNAPPER_REFRESH_TOKEN: "test-refresh",
       SNAPPER_MCP_LOG_LEVEL: "error",
       ...overrides,
     },
@@ -96,7 +95,6 @@ describe("bridge subprocess — env failure paths", () => {
         ...process.env,
         SNAPPER_BASE_URL: undefined,
         SNAPPER_ACCESS_TOKEN: "a",
-        SNAPPER_REFRESH_TOKEN: "r",
       },
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -113,7 +111,6 @@ describe("bridge subprocess — env failure paths", () => {
         ...process.env,
         SNAPPER_BASE_URL: "not-a-url",
         SNAPPER_ACCESS_TOKEN: "a",
-        SNAPPER_REFRESH_TOKEN: "r",
       },
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -130,7 +127,6 @@ describe("bridge subprocess — env failure paths", () => {
         ...process.env,
         SNAPPER_BASE_URL: "http://localhost:8000/api/mcp",
         SNAPPER_ACCESS_TOKEN: undefined,
-        SNAPPER_REFRESH_TOKEN: "r",
       },
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -141,13 +137,12 @@ describe("bridge subprocess — env failure paths", () => {
     expect(stderrChunks.join("")).toMatch(/SNAPPER_ACCESS_TOKEN/);
   });
 
-  it("starts WITHOUT SNAPPER_REFRESH_TOKEN (PAT mode) — env validation passes, fails later at handshake", async () => {
+  it("starts with the 2 required env vars and fails at handshake when backend is unreachable", async () => {
     const child = spawn(process.execPath, [DIST_ENTRY], {
       env: {
         ...process.env,
         SNAPPER_BASE_URL: "http://127.0.0.1:1/api/mcp",
-        SNAPPER_ACCESS_TOKEN: "pat-access",
-        SNAPPER_REFRESH_TOKEN: undefined,
+        SNAPPER_ACCESS_TOKEN: "access",
       },
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -156,7 +151,6 @@ describe("bridge subprocess — env failure paths", () => {
     const [code] = (await once(child, "exit")) as [number | null];
     expect(code).toBe(1);
     const stderr = stderrChunks.join("");
-    expect(stderr).not.toMatch(/Missing required environment variable SNAPPER_REFRESH_TOKEN/);
     expect(stderr).toMatch(/MCP handshake to Snapper failed at startup/);
   });
 });
