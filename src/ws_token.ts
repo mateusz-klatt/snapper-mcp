@@ -3,43 +3,23 @@
  *
  * Calls `POST /api/auth/ws_token` with the caller's access bearer
  * and returns the minted one-shot token + its absolute expiration.
- * Unlike a `/api/auth/refresh` round-trip, this route does NOT
- * rotate the refresh-token pair — long-running watch processes can
- * mint successive ws_tokens without revoking a sibling MCP server's
- * refresh JTI.
- *
- * Hard constraint — caller must supply an access bearer:
- *
- *   The dedicated ws_token endpoint authenticates via
- *   `Authorization: Bearer <access>` only. Operators configuring
- *   the watch subcommand against a long-lived PAT-style delegate
- *   (no refresh token issued) flow naturally — the bridge already
- *   exposes `TokenStore.accessToken()` regardless of whether the
- *   delegate carries a refresh credential. Operators paired with a
- *   rotating-refresh delegate continue to rotate normally through
- *   `bridge_fetch.ts`; this module never touches refresh state.
  *
  * Failure surfaces:
  *
- *   - `RefreshFailedError` keeps the existing class so the watch
- *     subcommand's reconnect loop maps "fetcher failed → retry"
- *     identically to the legacy refresh-payload path.
- *   - `401` → `RefreshFailedError("ws_token rejected (401)", 401)`.
- *     The access bearer is wrong / expired. The watch loop logs
+ *   - `401` → `AuthFailedError("ws_token rejected (401)", 401)`.
+ *     The access bearer is wrong or expired. The watch loop logs
  *     the failure and reconnects with backoff; once the operator
- *     supplies a valid access bearer (typically by restarting the
- *     bridge after refreshing the configured token), the next
- *     ws_token mint succeeds.
- *   - `429` → `RefreshFailedError("ws_token rate-limited", 429)`.
+ *     supplies a valid access bearer (typically by recreating the
+ *     AI delegate in Snapper), the next ws_token mint succeeds.
+ *   - `429` → `AuthFailedError("ws_token rate-limited", 429)`.
  *     Bubbled as transient; the reconnect backoff already paces
- *     re-attempts, so the WS_TOKEN_RATE_LIMIT budget is unlikely
- *     to be exhausted twice consecutively.
- *   - 5xx / network → `RefreshFailedError(...)` retried by the
+ *     re-attempts.
+ *   - 5xx / network → `AuthFailedError(...)` retried by the
  *     reconnect loop.
  */
 
 import { computeWsTokenUrl } from "./env.js";
-import { RefreshFailedError } from "./errors.js";
+import { AuthFailedError } from "./errors.js";
 import type { Logger } from "./logger.js";
 import type { TokenStore } from "./token_store.js";
 
@@ -72,7 +52,7 @@ interface WsTokenPayloadEnvelope {
 
 function parseWsTokenBody(raw: unknown, status: number): WsTokenResult {
   if (raw === null || typeof raw !== "object") {
-    throw new RefreshFailedError(
+    throw new AuthFailedError(
       "ws_token response malformed: body is not a JSON object",
       status,
       raw,
@@ -81,20 +61,20 @@ function parseWsTokenBody(raw: unknown, status: number): WsTokenResult {
   const envelope = raw as WsTokenPayloadEnvelope;
   const wsToken = envelope.payload?.ws_token;
   if (typeof wsToken !== "string" || wsToken.length === 0) {
-    throw new RefreshFailedError(
+    throw new AuthFailedError(
       "ws_token response malformed: payload.ws_token missing or empty",
       status,
     );
   }
   const wsTokenExp = envelope.payload?.ws_token_exp;
   if (typeof wsTokenExp !== "string" || wsTokenExp.length === 0) {
-    throw new RefreshFailedError(
+    throw new AuthFailedError(
       "ws_token response malformed: payload.ws_token_exp missing or empty",
       status,
     );
   }
   if (!ISO_8601_PATTERN.test(wsTokenExp) || Number.isNaN(Date.parse(wsTokenExp))) {
-    throw new RefreshFailedError(
+    throw new AuthFailedError(
       `ws_token response malformed: payload.ws_token_exp is not a parseable ISO 8601 datetime (got ${JSON.stringify(wsTokenExp)})`,
       status,
     );
@@ -122,27 +102,27 @@ export async function fetchWsToken(
     });
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") {
-      throw new RefreshFailedError("ws_token timeout after 10s", 0, err);
+      throw new AuthFailedError("ws_token timeout after 10s", 0, err);
     }
-    throw new RefreshFailedError("ws_token network error", 0, err);
+    throw new AuthFailedError("ws_token network error", 0, err);
   } finally {
     clearTimeout(timer);
   }
 
   if (response.status === 401) {
-    throw new RefreshFailedError("ws_token rejected (401)", 401);
+    throw new AuthFailedError("ws_token rejected (401)", 401);
   }
   if (response.status === 429) {
-    throw new RefreshFailedError("ws_token rate-limited", 429);
+    throw new AuthFailedError("ws_token rate-limited", 429);
   }
   if (response.status >= 500) {
-    throw new RefreshFailedError(
+    throw new AuthFailedError(
       `ws_token server error (${response.status})`,
       response.status,
     );
   }
   if (!response.ok) {
-    throw new RefreshFailedError(
+    throw new AuthFailedError(
       `ws_token unexpected status (${response.status})`,
       response.status,
     );
@@ -152,7 +132,7 @@ export async function fetchWsToken(
   try {
     body = await response.json();
   } catch (err) {
-    throw new RefreshFailedError("ws_token response malformed: not JSON", response.status, err);
+    throw new AuthFailedError("ws_token response malformed: not JSON", response.status, err);
   }
   const result = parseWsTokenBody(body, response.status);
   logger.debug("ws_token: minted via /api/auth/ws_token");

@@ -1,7 +1,7 @@
 {
   "name": "snapper-mcp",
-  "version": "0.6.0",
-  "description": "Connects Claude Code / Claude Desktop to a Snapper trading backend via the /api/mcp endpoint. Ships a watch subcommand that streams live signal + order events as JSONL, auto-wired as a Claude Code plugin monitor when configured.",
+  "version": "0.7.0",
+  "description": "Connects Claude Code / Claude Desktop to a Snapper trading backend via the /api/mcp endpoint. Ships a watch subcommand that streams live signal + order events as JSONL, auto-wired as a Claude Code plugin monitor sharing the same long-lived AI delegate token as the proxy MCP server.",
   "author": {
     "name": "Mateusz Klatt",
     "url": "https://github.com/mateusz-klatt"
@@ -27,22 +27,8 @@
     "SNAPPER_ACCESS_TOKEN": {
       "type": "string",
       "title": "Access token",
-      "description": "JWT or long-lived PAT. Paste from Snapper's AI Integration config-snippet generator. Auto-refreshed when paired with a refresh token (see below).",
+      "description": "Long-lived AI delegate JWT. Paste from Snapper's AI Integration config-snippet generator. The same token authenticates both the proxy MCP server and the watch monitor.",
       "required": true,
-      "sensitive": true
-    },
-    "SNAPPER_REFRESH_TOKEN": {
-      "type": "string",
-      "title": "Refresh token (optional - leave blank for long-lived PAT delegates)",
-      "description": "Long-lived JWT for auto-rotation. Paste for rotating-token delegates. LEAVE BLANK for delegates minted with long_lived=true (single ~10-year access token, no refresh).",
-      "required": false,
-      "sensitive": true
-    },
-    "SNAPPER_WATCH_ACCESS_TOKEN": {
-      "type": "string",
-      "title": "Watch monitor access token (required for push-wakeup monitor)",
-      "description": "Long-lived PAT for the push-wakeup monitor. Long-lived single-delegate operators paste the SAME token as Access token (no rotation, no race). Rotating-delegate operators mint a SECOND long-lived PAT in Snapper's AI Integration UI explicitly for the monitor. Leaving this blank causes the monitor to hard-error at session start; if you don't want the monitor, disable the plugin or remove the monitors[] array from the local manifest cache.",
-      "required": false,
       "sensitive": true
     }
   },
@@ -50,19 +36,17 @@
     "snapper": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@mateusz-klatt/snapper-mcp@0.6.0"],
+      "args": ["-y", "@mateusz-klatt/snapper-mcp@0.7.0"],
       "env": {
         "SNAPPER_BASE_URL": "${user_config.SNAPPER_BASE_URL}",
-        "SNAPPER_ACCESS_TOKEN": "${user_config.SNAPPER_ACCESS_TOKEN}",
-        "SNAPPER_REFRESH_TOKEN": "${user_config.SNAPPER_REFRESH_TOKEN}",
-        "SNAPPER_WATCH_ACCESS_TOKEN": "${user_config.SNAPPER_WATCH_ACCESS_TOKEN}"
+        "SNAPPER_ACCESS_TOKEN": "${user_config.SNAPPER_ACCESS_TOKEN}"
       }
     }
   },
   "monitors": [
     {
       "name": "snapper-watch",
-      "command": "npx -y @mateusz-klatt/snapper-mcp@0.6.0 watch --config=\"${CLAUDE_PLUGIN_DATA}/env.json\"",
+      "command": "npx -y @mateusz-klatt/snapper-mcp@0.7.0 watch --config=\"${CLAUDE_PLUGIN_DATA}/env.json\"",
       "description": "Live Snapper signal + order events streamed as JSONL"
     }
   ]

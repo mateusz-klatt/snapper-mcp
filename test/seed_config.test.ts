@@ -12,8 +12,6 @@ function bridgeEnv(overrides: Partial<BridgeEnv> = {}): BridgeEnv {
   return {
     baseUrl: new URL("https://snapper.example.com/api/mcp/"),
     accessToken: "access-token",
-    refreshToken: "refresh-token",
-    watchAccessToken: "watch-token",
     ...overrides,
   };
 }
@@ -59,8 +57,6 @@ describe("seedConfigFileIfPluginContext", () => {
     await expect(readSeedFile(root)).resolves.toEqual({
       SNAPPER_BASE_URL: "https://snapper.example.com/api/mcp/",
       SNAPPER_ACCESS_TOKEN: "access-token",
-      SNAPPER_REFRESH_TOKEN: "refresh-token",
-      SNAPPER_WATCH_ACCESS_TOKEN: "watch-token",
     });
     if (process.platform !== "win32") {
       expect((await stat(path.join(root, "env.json"))).mode & 0o777).toBe(0o600);
@@ -141,7 +137,7 @@ describe("seedConfigFileIfPluginContext", () => {
     roots.push(root);
     const logger = testLogger();
     await seedConfigFileIfPluginContext(
-      bridgeEnv({ accessToken: "sensitive-access", watchAccessToken: "sensitive-watch" }),
+      bridgeEnv({ accessToken: "sensitive-access" }),
       { CLAUDE_PLUGIN_DATA: root } as NodeJS.ProcessEnv,
       logger,
     );
@@ -150,20 +146,20 @@ describe("seedConfigFileIfPluginContext", () => {
       .map(String)
       .join("\n");
     expect(messages).not.toContain("sensitive-access");
-    expect(messages).not.toContain("sensitive-watch");
   });
 
-  it("writes blank optional fields when optional tokens are absent", async () => {
+  it("writes a 2-key envelope (no other token slots)", async () => {
     const root = await tempRoot();
     roots.push(root);
     await seedConfigFileIfPluginContext(
-      bridgeEnv({ refreshToken: null, watchAccessToken: null }),
+      bridgeEnv(),
       { CLAUDE_PLUGIN_DATA: root } as NodeJS.ProcessEnv,
       testLogger(),
     );
-    await expect(readSeedFile(root)).resolves.toMatchObject({
-      SNAPPER_REFRESH_TOKEN: "",
-      SNAPPER_WATCH_ACCESS_TOKEN: "",
-    });
+    const payload = await readSeedFile(root);
+    expect(Object.keys(payload).sort((a, b) => a.localeCompare(b))).toEqual([
+      "SNAPPER_ACCESS_TOKEN",
+      "SNAPPER_BASE_URL",
+    ]);
   });
 });

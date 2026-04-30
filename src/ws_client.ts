@@ -6,10 +6,7 @@
  *
  *   1. Mint a one-shot ws_token via the dedicated
  *      `POST /api/auth/ws_token` endpoint (`fetchWsToken`). The
- *      route authenticates with the access bearer and does NOT
- *      rotate the refresh-token pair, so the watch session does
- *      not contend with a sibling MCP server on a shared refresh
- *      JTI.
+ *      route authenticates with the access bearer.
  *   2. Open the socket with `Authorization: Bearer <access_token>`
  *      on the upgrade request — the backend prefers the bearer
  *      header over the cookie fallback for header-only clients
@@ -58,18 +55,6 @@
  *   alone, since a server that accepts the upgrade then immediately
  *   closes (e.g. ws_token replay) MUST not be treated as a healthy
  *   reconnect.
- *
- * Credential compatibility:
- *
- *   `fetchWsToken` uses the access bearer with no refresh
- *   rotation, so PAT-style delegates configured without a refresh
- *   token mint ws_tokens identically to rotating delegates. PAT
- *   delegates are recommended for production push-wakeup flows
- *   because their access tokens are long-lived; rotating delegates'
- *   access tokens expire after the configured TTL window (15min
- *   by default), at which point the watch session will fail on
- *   its next ws_token mint until the operator restarts the bridge
- *   with a fresh access bearer.
  *
  * AI-review dedup:
  *

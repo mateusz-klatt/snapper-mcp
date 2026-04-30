@@ -49,13 +49,13 @@ describe("parseWatchArgs", () => {
       "--config=/tmp/env.json",
       "--topic",
       "signals.",
-      "--watch-access-token",
-      "watch",
+      "--access-token",
+      "explicit",
       "--base-url=https://snapper.example.com/api/mcp",
     ]);
     expect(args.topics).toEqual(["signals."]);
     expect(args.flags.configPath).toBe("/tmp/env.json");
-    expect(args.flags.watchAccessToken).toBe("watch");
+    expect(args.flags.accessToken).toBe("explicit");
     expect(args.flags.baseUrl).toBe("https://snapper.example.com/api/mcp");
   });
 
@@ -140,8 +140,6 @@ function baseEnv(overrides: Record<string, string | undefined> = {}): NodeJS.Pro
   return {
     SNAPPER_BASE_URL: "http://localhost:8000/api/mcp",
     SNAPPER_ACCESS_TOKEN: "access-tok",
-    SNAPPER_REFRESH_TOKEN: "refresh-tok",
-    SNAPPER_WATCH_ACCESS_TOKEN: "watch-tok",
     SNAPPER_MCP_LOG_LEVEL: "error",
     ...overrides,
   } as NodeJS.ProcessEnv;
@@ -447,11 +445,9 @@ describe("watchMain — error paths", () => {
   it("uses process.env when no source option is supplied", async () => {
     const previousBaseUrl = process.env.SNAPPER_BASE_URL;
     const previousAccess = process.env.SNAPPER_ACCESS_TOKEN;
-    const previousWatchAccess = process.env.SNAPPER_WATCH_ACCESS_TOKEN;
     const previousLogLevel = process.env.SNAPPER_MCP_LOG_LEVEL;
     process.env.SNAPPER_BASE_URL = "http://localhost:8000/api/mcp";
     process.env.SNAPPER_ACCESS_TOKEN = "access-tok";
-    process.env.SNAPPER_WATCH_ACCESS_TOKEN = "watch-tok";
     process.env.SNAPPER_MCP_LOG_LEVEL = "error";
     try {
       const { factory, sessions } = createCapturingFactory();
@@ -465,7 +461,7 @@ describe("watchMain — error paths", () => {
         const timer = setTimeout(resolve, 5);
         if (typeof timer.unref === "function") timer.unref();
       });
-      expect(sessions[0]?.options.tokenStore.accessToken()).toBe("watch-tok");
+      expect(sessions[0]?.options.tokenStore.accessToken()).toBe("access-tok");
       sessions[0]?.resolveRun();
       await runPromise;
     } finally {
@@ -478,11 +474,6 @@ describe("watchMain — error paths", () => {
         delete process.env.SNAPPER_ACCESS_TOKEN;
       } else {
         process.env.SNAPPER_ACCESS_TOKEN = previousAccess;
-      }
-      if (previousWatchAccess === undefined) {
-        delete process.env.SNAPPER_WATCH_ACCESS_TOKEN;
-      } else {
-        process.env.SNAPPER_WATCH_ACCESS_TOKEN = previousWatchAccess;
       }
       if (previousLogLevel === undefined) {
         delete process.env.SNAPPER_MCP_LOG_LEVEL;
@@ -629,7 +620,7 @@ describe("watchMain — config-file startup", () => {
       configPath,
       JSON.stringify({
         SNAPPER_BASE_URL: "http://localhost:8000/api/mcp",
-        SNAPPER_WATCH_ACCESS_TOKEN: "config-watch",
+        SNAPPER_ACCESS_TOKEN: "config-access",
       }),
       { mode: 0o600 },
     );
@@ -658,7 +649,7 @@ describe("watchMain — config-file startup", () => {
         configPath,
         JSON.stringify({
           SNAPPER_BASE_URL: "http://localhost:8000/api/mcp",
-          SNAPPER_WATCH_ACCESS_TOKEN: "config-watch",
+          SNAPPER_ACCESS_TOKEN: "config-access",
         }),
         { mode: 0o600 },
       );
@@ -728,7 +719,7 @@ describe("watchMain — config-file startup", () => {
     const stderrText = stderrSpy.mock.calls
       .map((c) => (typeof c[0] === "string" ? c[0] : String(c[0])))
       .join("");
-    expect(stderrText).toMatch(/SNAPPER_WATCH_ACCESS_TOKEN/);
+    expect(stderrText).toMatch(/SNAPPER_ACCESS_TOKEN/);
     expect(stderrText).toMatch(/was not found after 1500ms/);
   });
 });

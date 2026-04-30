@@ -1,139 +1,23 @@
 import { describe, expect, it } from "vitest";
 
-import { NoRefreshTokenError } from "../src/errors.js";
-import { TokenStore, type RefreshFn, type TokenPair } from "../src/token_store.js";
+import { TokenStore, type TokenPair } from "../src/token_store.js";
 
-const initial: TokenPair = { access: "access-1", refresh: "refresh-1" };
-const rotated: TokenPair = { access: "access-2", refresh: "refresh-2" };
+const initial: TokenPair = { access: "access-1" };
 
 describe("TokenStore", () => {
-  it("returns the initial access token until rotate runs", () => {
+  it("returns the access token supplied at construction", () => {
     const store = new TokenStore(initial);
     expect(store.accessToken()).toBe("access-1");
+  });
+
+  it("current() returns the underlying pair", () => {
+    const store = new TokenStore(initial);
     expect(store.current()).toEqual(initial);
   });
 
-  it("rotates the pair on successful refresh and publishes the new access token", async () => {
-    const store = new TokenStore(initial);
-    const via: RefreshFn = async () => rotated;
-    const next = await store.rotate(via);
-    expect(next).toEqual(rotated);
-    expect(store.accessToken()).toBe("access-2");
-    expect(store.current()).toEqual(rotated);
-  });
-
-  it("passes the current pair to the refresh callable", async () => {
-    const store = new TokenStore(initial);
-    let seen: TokenPair | undefined;
-    const via: RefreshFn = async (current) => {
-      seen = current;
-      return rotated;
-    };
-    await store.rotate(via);
-    expect(seen).toEqual(initial);
-  });
-
-  it("single-flights concurrent rotate calls — via is invoked EXACTLY once", async () => {
-    const store = new TokenStore(initial);
-    let invocations = 0;
-    let resolveRefresh!: (pair: TokenPair) => void;
-    const via: RefreshFn = async () => {
-      invocations += 1;
-      return new Promise<TokenPair>((resolve) => {
-        resolveRefresh = resolve;
-      });
-    };
-
-    const callers = [store.rotate(via), store.rotate(via), store.rotate(via), store.rotate(via)];
-    expect(invocations).toBe(1);
-
-    resolveRefresh(rotated);
-    const results = await Promise.all(callers);
-    for (const result of results) {
-      expect(result).toEqual(rotated);
-    }
-    expect(invocations).toBe(1);
-    expect(store.accessToken()).toBe("access-2");
-  });
-
-  it("race-tight: accessToken() returns the OLD pair while rotation is pending", async () => {
-    const store = new TokenStore(initial);
-    let resolveRefresh!: (pair: TokenPair) => void;
-    const via: RefreshFn = async () =>
-      new Promise<TokenPair>((resolve) => {
-        resolveRefresh = resolve;
-      });
-
-    const pending = store.rotate(via);
-    expect(store.accessToken()).toBe("access-1");
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    expect(store.accessToken()).toBe("access-1");
-
-    resolveRefresh(rotated);
-    await pending;
-    expect(store.accessToken()).toBe("access-2");
-  });
-
-  it("clears inFlight on refresh failure so the next rotate starts fresh", async () => {
-    const store = new TokenStore(initial);
-    const failing: RefreshFn = async () => {
-      throw new Error("refresh rejected");
-    };
-    await expect(store.rotate(failing)).rejects.toThrow("refresh rejected");
-    expect(store.accessToken()).toBe("access-1");
-
-    let reattempted = false;
-    const ok: RefreshFn = async () => {
-      reattempted = true;
-      return rotated;
-    };
-    await store.rotate(ok);
-    expect(reattempted).toBe(true);
-    expect(store.accessToken()).toBe("access-2");
-  });
-
-  it("throws NoRefreshTokenError when rotate runs in PAT mode (refresh=null)", async () => {
-    const patOnly: TokenPair = { access: "pat-access", refresh: null };
-    const store = new TokenStore(patOnly);
-    const via: RefreshFn = async () => rotated;
-    await expect(store.rotate(via)).rejects.toBeInstanceOf(NoRefreshTokenError);
-    expect(store.accessToken()).toBe("pat-access");
-    expect(store.hasRefreshToken()).toBe(false);
-  });
-
-  it("hasRefreshToken reflects the presence/absence of the refresh string", () => {
-    const rotatingStore = new TokenStore(initial);
-    expect(rotatingStore.hasRefreshToken()).toBe(true);
-    const patStore = new TokenStore({ access: "pat", refresh: null });
-    expect(patStore.hasRefreshToken()).toBe(false);
-    const emptyStringStore = new TokenStore({ access: "pat", refresh: "" });
-    expect(emptyStringStore.hasRefreshToken()).toBe(false);
-  });
-
-  it("rotate() throws NoRefreshTokenError when refresh is an empty string (defensive parity with hasRefreshToken)", async () => {
-    const emptyRefresh = new TokenStore({ access: "pat", refresh: "" });
-    const via: RefreshFn = async () => rotated;
-    await expect(emptyRefresh.rotate(via)).rejects.toBeInstanceOf(NoRefreshTokenError);
-    expect(emptyRefresh.hasRefreshToken()).toBe(false);
-  });
-
-  it("late arrivals AFTER rotate settled trigger a NEW refresh cycle", async () => {
-    const store = new TokenStore(initial);
-    let invocations = 0;
-    const via: RefreshFn = async () => {
-      invocations += 1;
-      return invocations === 1
-        ? rotated
-        : { access: "access-3", refresh: "refresh-3" };
-    };
-
-    await store.rotate(via);
-    expect(invocations).toBe(1);
-    expect(store.accessToken()).toBe("access-2");
-
-    const next = await store.rotate(via);
-    expect(invocations).toBe(2);
-    expect(next.access).toBe("access-3");
-    expect(store.accessToken()).toBe("access-3");
+  it("accessToken() is stable across calls", () => {
+    const store = new TokenStore({ access: "stable-token" });
+    expect(store.accessToken()).toBe("stable-token");
+    expect(store.accessToken()).toBe("stable-token");
   });
 });

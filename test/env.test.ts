@@ -4,20 +4,12 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import {
-  EnvValidationError,
-  computeRefreshUrl,
-  computeWsUrl,
-  parseEnv,
-  parseWatchEnv,
-} from "../src/env.js";
+import { EnvValidationError, computeWsUrl, parseEnv, parseWatchEnv } from "../src/env.js";
 
 function baseEnv(overrides: Partial<Record<string, string | undefined>> = {}): NodeJS.ProcessEnv {
   return {
     SNAPPER_BASE_URL: "http://localhost:8000/api/mcp",
     SNAPPER_ACCESS_TOKEN: "access-jwt",
-    SNAPPER_REFRESH_TOKEN: "refresh-jwt",
-    SNAPPER_WATCH_ACCESS_TOKEN: "watch-jwt",
     ...overrides,
   } as NodeJS.ProcessEnv;
 }
@@ -28,8 +20,6 @@ describe("parseEnv", () => {
     expect(result.baseUrl).toBeInstanceOf(URL);
     expect(result.baseUrl.toString()).toBe("http://localhost:8000/api/mcp/");
     expect(result.accessToken).toBe("access-jwt");
-    expect(result.refreshToken).toBe("refresh-jwt");
-    expect(result.watchAccessToken).toBe("watch-jwt");
   });
 
   it("leaves the URL unchanged when the user already provided a trailing slash", async () => {
@@ -41,17 +31,8 @@ describe("parseEnv", () => {
   });
 
   it("trims surrounding whitespace on tokens but keeps the canonical URL", async () => {
-    const result = await parseEnv(
-      baseEnv({
-        SNAPPER_ACCESS_TOKEN: "  access-jwt  ",
-        SNAPPER_REFRESH_TOKEN: "\trefresh-jwt\n",
-        SNAPPER_WATCH_ACCESS_TOKEN: " watch-jwt ",
-      }),
-      [],
-    );
+    const result = await parseEnv(baseEnv({ SNAPPER_ACCESS_TOKEN: "  access-jwt  " }), []);
     expect(result.accessToken).toBe("access-jwt");
-    expect(result.refreshToken).toBe("refresh-jwt");
-    expect(result.watchAccessToken).toBe("watch-jwt");
   });
 
   it("throws EnvValidationError with the missing variable name when SNAPPER_BASE_URL is absent", async () => {
@@ -82,29 +63,6 @@ describe("parseEnv", () => {
     }
   });
 
-  it("returns refreshToken=null when SNAPPER_REFRESH_TOKEN is absent", async () => {
-    const result = await parseEnv(baseEnv({ SNAPPER_REFRESH_TOKEN: undefined }), []);
-    expect(result.accessToken).toBe("access-jwt");
-    expect(result.refreshToken).toBeNull();
-  });
-
-  it("returns refreshToken=null when SNAPPER_REFRESH_TOKEN is blank", async () => {
-    const result = await parseEnv(baseEnv({ SNAPPER_REFRESH_TOKEN: "   " }), []);
-    expect(result.refreshToken).toBeNull();
-  });
-
-  it("returns watchAccessToken=null when SNAPPER_WATCH_ACCESS_TOKEN is blank", async () => {
-    const result = await parseEnv(baseEnv({ SNAPPER_WATCH_ACCESS_TOKEN: "" }), []);
-    expect(result.watchAccessToken).toBeNull();
-  });
-
-  it("legacy rotating setup with the original three env vars still parses", async () => {
-    const result = await parseEnv(baseEnv({ SNAPPER_WATCH_ACCESS_TOKEN: undefined }), []);
-    expect(result.accessToken).toBe("access-jwt");
-    expect(result.refreshToken).toBe("refresh-jwt");
-    expect(result.watchAccessToken).toBeNull();
-  });
-
   it("rejects blank access tokens", async () => {
     try {
       await parseEnv(baseEnv({ SNAPPER_ACCESS_TOKEN: "   " }), []);
@@ -131,6 +89,17 @@ describe("parseEnv", () => {
     }
   });
 
+  it("ignores unknown env vars (silent-ignore contract)", async () => {
+    const result = await parseEnv(
+      baseEnv({ SOME_UNRELATED_VAR: "ignored", ANOTHER: "also-ignored" } as Record<
+        string,
+        string
+      >),
+      [],
+    );
+    expect(result.accessToken).toBe("access-jwt");
+  });
+
   it("loads values from --config before falling back to environment variables", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "snapper-mcp-env-"));
     try {
@@ -146,39 +115,9 @@ describe("parseEnv", () => {
       const result = await parseEnv(baseEnv(), [`--config=${configPath}`]);
       expect(result.baseUrl.toString()).toBe("https://config.example.com/api/mcp/");
       expect(result.accessToken).toBe("config-access");
-      expect(result.refreshToken).toBe("refresh-jwt");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
-  });
-});
-
-describe("computeRefreshUrl", () => {
-  it("derives the refresh endpoint from an /api/mcp base", () => {
-    const refresh = computeRefreshUrl(new URL("http://localhost:8000/api/mcp"));
-    expect(refresh.pathname).toBe("/api/auth/refresh");
-    expect(refresh.origin).toBe("http://localhost:8000");
-    expect(refresh.searchParams.get("return_tokens")).toBe("true");
-    expect(refresh.toString()).toBe("http://localhost:8000/api/auth/refresh?return_tokens=true");
-  });
-
-  it("does not concatenate the refresh path onto the /api/mcp segment", () => {
-    const refresh = computeRefreshUrl(new URL("https://snapper.example.com/api/mcp"));
-    expect(refresh.pathname).toBe("/api/auth/refresh");
-    expect(refresh.pathname.startsWith("/api/mcp")).toBe(false);
-  });
-
-  it("preserves https scheme, host, and port", () => {
-    const refresh = computeRefreshUrl(new URL("https://snapper.example.com:8443/api/mcp"));
-    expect(refresh.origin).toBe("https://snapper.example.com:8443");
-    expect(refresh.toString()).toBe(
-      "https://snapper.example.com:8443/api/auth/refresh?return_tokens=true",
-    );
-  });
-
-  it("always sets return_tokens=true", () => {
-    const refresh = computeRefreshUrl(new URL("http://localhost:8000/api/mcp"));
-    expect(refresh.search).toContain("return_tokens=true");
   });
 });
 
@@ -258,21 +197,15 @@ describe("computeWsUrl", () => {
 });
 
 describe("parseWatchEnv", () => {
-  it("returns a BridgeEnv with refreshToken hard-pinned to null", async () => {
+  it("resolves the same access token as parseEnv", async () => {
     const result = await parseWatchEnv(baseEnv(), []);
     expect(result.baseUrl.toString()).toBe("http://localhost:8000/api/mcp/");
-    expect(result.accessToken).toBe("watch-jwt");
-    expect(result.refreshToken).toBeNull();
-    expect(result.watchAccessToken).toBe("watch-jwt");
+    expect(result.accessToken).toBe("access-jwt");
   });
 
-  it("uses --access-token as an explicit watch-mode escape hatch", async () => {
-    const result = await parseWatchEnv(
-      baseEnv({ SNAPPER_WATCH_ACCESS_TOKEN: undefined }),
-      ["--access-token", "manual-watch"],
-    );
-    expect(result.accessToken).toBe("manual-watch");
-    expect(result.watchAccessToken).toBe("manual-watch");
+  it("uses --access-token CLI flag when given", async () => {
+    const result = await parseWatchEnv(baseEnv(), ["--access-token", "explicit"]);
+    expect(result.accessToken).toBe("explicit");
   });
 
   it("normalises the base URL to a trailing-slash pathname", async () => {
@@ -280,47 +213,26 @@ describe("parseWatchEnv", () => {
     expect(result.baseUrl.pathname).toBe("/api/mcp/");
   });
 
-  it("throws EnvValidationError naming SNAPPER_WATCH_ACCESS_TOKEN when no watch token resolves", async () => {
+  it("throws EnvValidationError naming SNAPPER_ACCESS_TOKEN when no access token resolves", async () => {
     try {
-      await parseWatchEnv(baseEnv({ SNAPPER_WATCH_ACCESS_TOKEN: undefined }), []);
+      await parseWatchEnv(baseEnv({ SNAPPER_ACCESS_TOKEN: undefined }), []);
       throw new Error("should have thrown");
     } catch (error) {
       expect(error).toBeInstanceOf(EnvValidationError);
       if (error instanceof EnvValidationError) {
-        expect(error.variable).toBe("SNAPPER_WATCH_ACCESS_TOKEN");
+        expect(error.variable).toBe("SNAPPER_ACCESS_TOKEN");
       }
     }
   });
 
-  it("throws EnvValidationError naming SNAPPER_BASE_URL when access resolves but base URL does not", async () => {
+  it("throws EnvValidationError naming SNAPPER_BASE_URL when base URL is missing", async () => {
     try {
-      await parseWatchEnv(
-        baseEnv({ SNAPPER_BASE_URL: undefined, SNAPPER_WATCH_ACCESS_TOKEN: "pat" }),
-        [],
-      );
+      await parseWatchEnv(baseEnv({ SNAPPER_BASE_URL: undefined }), []);
       throw new Error("should have thrown");
     } catch (error) {
       expect(error).toBeInstanceOf(EnvValidationError);
       if (error instanceof EnvValidationError) {
         expect(error.variable).toBe("SNAPPER_BASE_URL");
-      }
-    }
-  });
-
-  it("does not use SNAPPER_ACCESS_TOKEN as a watch token fallback from env vars", async () => {
-    try {
-      await parseWatchEnv(
-        baseEnv({
-          SNAPPER_ACCESS_TOKEN: "proxy-only",
-          SNAPPER_WATCH_ACCESS_TOKEN: undefined,
-        }),
-        [],
-      );
-      throw new Error("should have thrown");
-    } catch (error) {
-      expect(error).toBeInstanceOf(EnvValidationError);
-      if (error instanceof EnvValidationError) {
-        expect(error.variable).toBe("SNAPPER_WATCH_ACCESS_TOKEN");
       }
     }
   });

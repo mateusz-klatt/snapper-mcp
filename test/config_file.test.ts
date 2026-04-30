@@ -31,15 +31,13 @@ describe("loadConfigFile", () => {
     await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
   });
 
-  it("loads a JSON config file with all known keys", async () => {
+  it("loads a JSON config file with both known keys", async () => {
     const root = await tempRoot();
     roots.push(root);
     const filePath = path.join(root, "env.json");
     const expected: ConfigFile = {
       SNAPPER_BASE_URL: "https://snapper.example.com/api/mcp",
       SNAPPER_ACCESS_TOKEN: "access",
-      SNAPPER_REFRESH_TOKEN: "refresh",
-      SNAPPER_WATCH_ACCESS_TOKEN: "watch",
     };
     await writeJson(filePath, expected);
     await expect(loadConfigFile(filePath, testLogger())).resolves.toEqual(expected);
