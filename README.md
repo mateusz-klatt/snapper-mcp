@@ -116,6 +116,40 @@ Two environment variables. The MCP host must set them before spawning:
 
 See [`.env.example`](./.env.example) for placeholder values.
 
+### Multi-profile support
+
+Run multiple Snapper instances (prod + staging, prod + local dev) from
+one bridge install. Select a profile at spawn time:
+
+```bash
+SNAPPER_PROFILE=prod snapper-mcp
+# or
+snapper-mcp --profile=prod
+```
+
+When a profile is selected, the bridge reads
+`SNAPPER_PROFILE_<UPPER>_BASE_URL` and
+`SNAPPER_PROFILE_<UPPER>_ACCESS_TOKEN` instead of the bare top-level
+vars (hard isolation — no accidental cross-profile fallback). Profile
+names match `^[a-z0-9]{1,32}$`. CLI flag wins over env var.
+
+The `--config` JSON file may carry a `profiles` block:
+
+```json
+{
+  "profiles": {
+    "prod":    { "SNAPPER_BASE_URL": "https://snapper.example.com/api/mcp", "SNAPPER_ACCESS_TOKEN": "..." },
+    "staging": { "SNAPPER_BASE_URL": "https://staging.example.com/api/mcp", "SNAPPER_ACCESS_TOKEN": "..." }
+  }
+}
+```
+
+Verify a profile offline before spawning the bridge:
+
+```bash
+snapper-mcp check --profile=prod
+```
+
 ## Generating tokens
 
 Snapper ships a **Settings → AI Delegates** UI that issues credentials.

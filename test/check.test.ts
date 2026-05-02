@@ -231,4 +231,34 @@ describe("checkMain", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("threads --profile through to profile-specific env vars", async () => {
+    const token = makeJwt({ sub: "prod-user", exp: Math.floor(Date.now() / 1000) + 3600 });
+    const { stdout } = fakeStreams();
+    const code = await checkMain({
+      argv: ["--profile=prod"],
+      stdout,
+      stderr: new WriteSink(),
+      env: {
+        SNAPPER_PROFILE_PROD_BASE_URL: VALID_BASE_URL,
+        SNAPPER_PROFILE_PROD_ACCESS_TOKEN: token,
+      },
+    });
+    expect(code).toBe(0);
+    expect(stdout.text()).toContain("sub: prod-user");
+  });
+
+  it("returns 1 with a profile-specific error message when profile vars are missing", async () => {
+    const stderr = new WriteSink();
+    const { stdout } = fakeStreams();
+    const code = await checkMain({
+      argv: [],
+      stdout,
+      stderr,
+      env: { SNAPPER_PROFILE: "prod" },
+    });
+    expect(code).toBe(1);
+    expect(stderr.text()).toContain("profile=prod");
+    expect(stderr.text()).toContain("SNAPPER_PROFILE_PROD_BASE_URL");
+  });
 });

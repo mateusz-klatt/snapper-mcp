@@ -5,6 +5,55 @@ All notable changes to `@mateusz-klatt/snapper-mcp` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] — 2026-05-02
+
+### New: multi-profile support
+
+Run two or more Snapper instances from a single bridge install (prod +
+staging, prod + local dev, etc.) by selecting a profile at spawn time:
+
+```bash
+SNAPPER_PROFILE=prod snapper-mcp
+# or
+snapper-mcp --profile=prod
+```
+
+When a profile is selected, the bridge resolves credentials in this
+order (CLI flag wins, then config file, then env var) — top-level bare
+vars are NOT consulted (hard isolation prevents accidental cross-profile
+leaks):
+
+1. `--base-url` / `--access-token` CLI flags
+2. `--config` file `profiles.<name>.SNAPPER_BASE_URL` /
+   `.SNAPPER_ACCESS_TOKEN`
+3. `SNAPPER_PROFILE_<UPPER>_BASE_URL` /
+   `SNAPPER_PROFILE_<UPPER>_ACCESS_TOKEN` env vars
+
+Without a profile selector, behaviour is unchanged: the bridge reads
+top-level `SNAPPER_BASE_URL` + `SNAPPER_ACCESS_TOKEN` from CLI / config
+/ env as before.
+
+Profile names must match `^[a-z0-9]{1,32}$` (lowercase ASCII + digits,
+1–32 chars). Underscores and uppercase are rejected to keep the env-var
+mapping unambiguous. `--profile` CLI flag overrides `SNAPPER_PROFILE`
+env var when both are set.
+
+Config file shape extension (additive — old single-creds files keep
+working):
+
+```json
+{
+  "profiles": {
+    "prod":    { "SNAPPER_BASE_URL": "https://snapper.example.com/api/mcp", "SNAPPER_ACCESS_TOKEN": "..." },
+    "staging": { "SNAPPER_BASE_URL": "https://staging.example.com/api/mcp", "SNAPPER_ACCESS_TOKEN": "..." }
+  }
+}
+```
+
+`snapper-mcp check --profile=prod` threads the selector through so an
+operator can verify each profile's token offline before spawning the
+bridge.
+
 ## [0.10.0] — 2026-05-02
 
 ### New env var

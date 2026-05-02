@@ -26,17 +26,25 @@ export class EnvValidationError extends Error {
 export interface BridgeEnv {
   readonly baseUrl: URL;
   readonly accessToken: string;
+  readonly profile: string | null;
 }
 
 export interface CliFlags {
   readonly configPath: string | null;
   readonly accessToken: string | null;
   readonly baseUrl: string | null;
+  readonly profile: string | null;
+}
+
+export interface ProfileBlock {
+  readonly SNAPPER_BASE_URL?: string;
+  readonly SNAPPER_ACCESS_TOKEN?: string;
 }
 
 export interface ConfigFile {
   readonly SNAPPER_BASE_URL?: string;
   readonly SNAPPER_ACCESS_TOKEN?: string;
+  readonly profiles?: Readonly<Record<string, ProfileBlock>>;
 }
 
 const REQUIRED_VARS = ["SNAPPER_BASE_URL", "SNAPPER_ACCESS_TOKEN"] as const;
@@ -44,6 +52,7 @@ const CONFIG_KEYS = ["SNAPPER_BASE_URL", "SNAPPER_ACCESS_TOKEN"] as const;
 const CONFIG_FILE_MAX_BYTES = 1024 * 1024;
 const CONFIG_FILE_RETRIES = 3;
 const CONFIG_FILE_RETRY_DELAY_MS = 500;
+const PROFILE_NAME_REGEX = /^[a-z0-9]{1,32}$/;
 
 type ConfigKey = (typeof CONFIG_KEYS)[number];
 type CliFlagKey = keyof CliFlags;
@@ -53,12 +62,14 @@ const EMPTY_FLAGS: CliFlags = {
   configPath: null,
   accessToken: null,
   baseUrl: null,
+  profile: null,
 };
 
 const FLAG_NAMES: ReadonlyMap<string, CliFlagKey> = new Map([
   ["--config", "configPath"],
   ["--access-token", "accessToken"],
   ["--base-url", "baseUrl"],
+  ["--profile", "profile"],
 ]);
 
 const noopLoggerMethod = (): undefined => undefined;
@@ -80,6 +91,7 @@ interface MissingDetail {
   readonly envNames: readonly string[];
   readonly configPath: string | null;
   readonly configLoaded: boolean;
+  readonly profile: string | null;
 }
 
 function asPresent(raw: string | null | undefined): string | null {
@@ -116,8 +128,56 @@ function configValue(configFile: ConfigFile | null, key: ConfigKey): string | nu
   return asPresent(configFile[key]);
 }
 
+function profileConfigValue(
+  configFile: ConfigFile | null,
+  profile: string,
+  key: ConfigKey,
+): string | null {
+  if (configFile === null) return null;
+  const profiles = configFile.profiles;
+  if (profiles === undefined) return null;
+  const block = profiles[profile];
+  if (block === undefined) return null;
+  return asPresent(block[key]);
+}
+
 function envValue(source: NodeJS.ProcessEnv, key: ConfigKey): string | null {
   return asPresent(source[key]);
+}
+
+function profileEnvKey(profile: string, key: ConfigKey): string {
+  const upper = profile.toUpperCase();
+  if (key === "SNAPPER_BASE_URL") return `SNAPPER_PROFILE_${upper}_BASE_URL`;
+  return `SNAPPER_PROFILE_${upper}_ACCESS_TOKEN`;
+}
+
+function profileEnvValue(
+  source: NodeJS.ProcessEnv,
+  profile: string,
+  key: ConfigKey,
+): string | null {
+  return asPresent(source[profileEnvKey(profile, key)]);
+}
+
+function validateProfileName(name: string, origin: string): string {
+  if (!PROFILE_NAME_REGEX.test(name)) {
+    throw new EnvValidationError(
+      `Invalid profile name "${name}" from ${origin}: expected lowercase alphanumeric ASCII, 1-32 characters (regex /^[a-z0-9]{1,32}$/).`,
+      "SNAPPER_PROFILE",
+    );
+  }
+  return name;
+}
+
+export function resolveProfile(
+  source: NodeJS.ProcessEnv,
+  flags: CliFlags,
+): string | null {
+  const flagValue = asPresent(flags.profile);
+  if (flagValue !== null) return validateProfileName(flagValue, "--profile CLI flag");
+  const envValueRaw = asPresent(source.SNAPPER_PROFILE);
+  if (envValueRaw !== null) return validateProfileName(envValueRaw, "SNAPPER_PROFILE env var");
+  return null;
 }
 
 function resolveFirst(
@@ -146,9 +206,14 @@ function envSource(key: ConfigKey): string {
   return `${key} env var`;
 }
 
-function missingConfigRung(configPath: string | null, configLoaded: boolean): string {
+function missingConfigRung(
+  configPath: string | null,
+  configLoaded: boolean,
+  profile: string | null,
+): string {
   if (configPath === null) return "--config file not given";
-  if (configLoaded) return `--config=${configPath} did not contain a non-blank value`;
+  const target = profile === null ? "a non-blank value" : `profiles.${profile} block`;
+  if (configLoaded) return `--config=${configPath} did not contain ${target}`;
   return `--config=${configPath} was not found after 1500ms (ENOENT)`;
 }
 
@@ -161,9 +226,17 @@ function missingMessage(detail: MissingDetail): string {
     detail.envNames.length === 1
       ? `${detail.envNames[0]} env var unset`
       : `${detail.envNames.join(" / ")} env vars unset`;
-  const attempted = [flagPart, missingConfigRung(detail.configPath, detail.configLoaded), envPart];
+  const attempted = [
+    flagPart,
+    missingConfigRung(detail.configPath, detail.configLoaded, detail.profile),
+    envPart,
+  ];
+  const subject =
+    detail.profile === null
+      ? `Missing required ${detail.variable}`
+      : `Missing required ${detail.variable} for profile=${detail.profile}`;
   return (
-    `Missing required ${detail.variable}: ${attempted.join(", ")}. ` +
+    `${subject}: ${attempted.join(", ")}. ` +
     "Set it via CLI flags, your MCP host's .mcp.json, claude_desktop_config.json for Claude Desktop, or environment variables."
   );
 }
@@ -209,6 +282,44 @@ function assertConfigFileHardening(path: string, stats: Stats, logger: Logger): 
   }
 }
 
+function parseProfileBlock(
+  raw: Record<string, unknown>,
+  name: string,
+  path: string,
+): ProfileBlock {
+  const block: Partial<Record<ConfigKey, string>> = {};
+  for (const key of CONFIG_KEYS) {
+    if (!Object.hasOwn(raw, key)) continue;
+    block[key] = validateKnownConfigValue(key, raw[key], `${path} profiles.${name}`);
+  }
+  return block;
+}
+
+function parseProfilesSection(
+  rawProfiles: unknown,
+  path: string,
+): Readonly<Record<string, ProfileBlock>> {
+  if (rawProfiles === null || typeof rawProfiles !== "object" || Array.isArray(rawProfiles)) {
+    throw new EnvValidationError(`Config file ${path} field "profiles" must be a JSON object.`);
+  }
+  const result: Record<string, ProfileBlock> = {};
+  for (const [name, value] of Object.entries(rawProfiles)) {
+    if (!PROFILE_NAME_REGEX.test(name)) {
+      throw new EnvValidationError(
+        `Config file ${path} profile name "${name}" is invalid: expected lowercase alphanumeric ASCII, 1-32 characters.`,
+        "SNAPPER_PROFILE",
+      );
+    }
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      throw new EnvValidationError(
+        `Config file ${path} profiles.${name} must be a JSON object.`,
+      );
+    }
+    result[name] = parseProfileBlock(value as Record<string, unknown>, name, path);
+  }
+  return result;
+}
+
 function parseConfigJson(path: string, text: string): ConfigFile {
   let parsed: unknown;
   try {
@@ -220,10 +331,13 @@ function parseConfigJson(path: string, text: string): ConfigFile {
     throw new EnvValidationError(`Config file ${path} must contain a JSON object.`);
   }
   const raw = parsed as Record<string, unknown>;
-  const config: Partial<Record<ConfigKey, string>> = {};
+  const config: { -readonly [K in keyof ConfigFile]: ConfigFile[K] } = {};
   for (const key of CONFIG_KEYS) {
     if (!Object.hasOwn(raw, key)) continue;
     config[key] = validateKnownConfigValue(key, raw[key], path);
+  }
+  if (Object.hasOwn(raw, "profiles")) {
+    config.profiles = parseProfilesSection(raw.profiles, path);
   }
   return config;
 }
@@ -296,6 +410,47 @@ export async function loadConfigFile(path: string, logger: Logger = NOOP_LOGGER)
   return parseConfigJson(path, text);
 }
 
+function buildResolveCandidates(
+  source: NodeJS.ProcessEnv,
+  configFile: ConfigFile | null,
+  profile: string | null,
+  key: ConfigKey,
+  flagName: string,
+  flagValue: string | null,
+): readonly [string, string | null][] {
+  if (profile === null) {
+    return [
+      [flagSource(flagName), flagValue],
+      [configSource(key), configValue(configFile, key)],
+      [envSource(key), envValue(source, key)],
+    ];
+  }
+  const profileEnvName = profileEnvKey(profile, key);
+  return [
+    [flagSource(flagName), flagValue],
+    [`--config file profiles.${profile}.${key}`, profileConfigValue(configFile, profile, key)],
+    [`${profileEnvName} env var`, profileEnvValue(source, profile, key)],
+  ];
+}
+
+function buildMissingDetail(
+  variable: ConfigKey,
+  flags: CliFlags,
+  configLoaded: boolean,
+  profile: string | null,
+  flagName: string,
+): MissingDetail {
+  const envName = profile === null ? variable : profileEnvKey(profile, variable);
+  return {
+    variable,
+    flagNames: [flagName],
+    envNames: [envName],
+    configPath: flags.configPath,
+    configLoaded,
+    profile,
+  };
+}
+
 export function resolveBridgeEnv(
   source: NodeJS.ProcessEnv,
   flags: CliFlags,
@@ -303,47 +458,45 @@ export function resolveBridgeEnv(
   logger: Logger = NOOP_LOGGER,
 ): BridgeEnv {
   const configLoaded = configFile !== null;
+  const profile = resolveProfile(source, flags);
+  if (profile !== null) logger.info(`profile=${profile} active`);
+
   const base = requireResolved(
     resolveFirst(
-      [
-        [flagSource("--base-url"), flags.baseUrl],
-        [configSource("SNAPPER_BASE_URL"), configValue(configFile, "SNAPPER_BASE_URL")],
-        [envSource("SNAPPER_BASE_URL"), envValue(source, "SNAPPER_BASE_URL")],
-      ],
+      buildResolveCandidates(
+        source,
+        configFile,
+        profile,
+        "SNAPPER_BASE_URL",
+        "--base-url",
+        flags.baseUrl,
+      ),
       logger,
       "SNAPPER_BASE_URL",
     ),
-    {
-      variable: "SNAPPER_BASE_URL",
-      flagNames: ["--base-url"],
-      envNames: ["SNAPPER_BASE_URL"],
-      configPath: flags.configPath,
-      configLoaded,
-    },
+    buildMissingDetail("SNAPPER_BASE_URL", flags, configLoaded, profile, "--base-url"),
   );
 
   const access = requireResolved(
     resolveFirst(
-      [
-        [flagSource("--access-token"), flags.accessToken],
-        [configSource("SNAPPER_ACCESS_TOKEN"), configValue(configFile, "SNAPPER_ACCESS_TOKEN")],
-        [envSource("SNAPPER_ACCESS_TOKEN"), envValue(source, "SNAPPER_ACCESS_TOKEN")],
-      ],
+      buildResolveCandidates(
+        source,
+        configFile,
+        profile,
+        "SNAPPER_ACCESS_TOKEN",
+        "--access-token",
+        flags.accessToken,
+      ),
       logger,
       "SNAPPER_ACCESS_TOKEN",
     ),
-    {
-      variable: "SNAPPER_ACCESS_TOKEN",
-      flagNames: ["--access-token"],
-      envNames: ["SNAPPER_ACCESS_TOKEN"],
-      configPath: flags.configPath,
-      configLoaded,
-    },
+    buildMissingDetail("SNAPPER_ACCESS_TOKEN", flags, configLoaded, profile, "--access-token"),
   );
 
   return {
     baseUrl: normalizeBridgeUrl(base),
     accessToken: access,
+    profile,
   };
 }
 
