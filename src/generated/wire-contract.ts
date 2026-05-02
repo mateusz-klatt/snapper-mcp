@@ -63,7 +63,7 @@ export interface OrderEventData extends FrameEnvelope {
   readonly type: "order_event";
   readonly exchange_order_id: string;
   readonly client_order_id: string;
-  readonly exchange: "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
+  readonly exchange: "paper" | "kraken" | "kraken_futures" | "walutomat";
   readonly instrument: string;
   readonly event: "submitted" | "accepted" | "rejected" | "cancelled" | "expired" | "replaced";
   readonly reason: string | null;
@@ -76,7 +76,7 @@ export interface OrderEventData extends FrameEnvelope {
 export interface SignalData extends FrameEnvelope {
   readonly type: "signal";
   readonly instrument: string;
-  readonly exchange: "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
+  readonly exchange: "paper" | "kraken" | "kraken_futures" | "walutomat";
   readonly side: "buy" | "sell";
   readonly strength: number;
   readonly reason: string;
