@@ -86,6 +86,8 @@ export interface SignalData extends FrameEnvelope {
   readonly wallet_public_id: string;
   readonly operator_public_id: string | null;
   readonly user_public_id: string | null;
+  readonly ai_review_public_id: string | null;
+  readonly ai_review_dispatch_version: number | null;
 }
 
 
