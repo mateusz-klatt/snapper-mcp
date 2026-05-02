@@ -12,6 +12,14 @@
  * ISO-8601 UTC timestamp; default off to keep stderr compact for the
  * common Claude Desktop use case.
  *
+ * SNAPPER_MCP_LOG_FORMAT=json switches every line to a single-line
+ * JSON object (``{"t":"...","lvl":"info","prefix":"...","msg":"...",
+ * "rest":[...]}``) so an operator can pipe stderr through ``jq`` for
+ * structured filtering. Default ``text`` keeps the human-readable
+ * one-line-per-event format. The ``t`` field is always present in
+ * JSON mode regardless of SNAPPER_MCP_LOG_TIMESTAMPS — the timestamp
+ * env var only governs the prefix on text-mode lines.
+ *
  * The stdout-writing console methods (debug, info, log, dir, trace,
  * group) are NOT used anywhere — Node routes all of them to stdout.
  * The eslint no-console rule + the stdout-gate npm script enforce
@@ -20,6 +28,7 @@
  */
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
+export type LogFormat = "text" | "json";
 
 const LEVEL_ORDER: Record<LogLevel, number> = {
   debug: 10,
@@ -39,6 +48,7 @@ export interface LoggerConfig {
   readonly prefix: string;
   readonly level: LogLevel;
   readonly timestamps: boolean;
+  readonly format: LogFormat;
 }
 
 function resolveLevel(raw: string | undefined): LogLevel {
@@ -56,6 +66,12 @@ function resolveTimestamps(raw: string | undefined): boolean {
   return lower === "1" || lower === "true" || lower === "yes" || lower === "on";
 }
 
+function resolveFormat(raw: string | undefined): LogFormat {
+  if (raw === undefined) return "text";
+  const lower = raw.trim().toLowerCase();
+  return lower === "json" ? "json" : "text";
+}
+
 export function readLoggerConfig(
   prefix: string,
   source: NodeJS.ProcessEnv = process.env,
@@ -64,6 +80,7 @@ export function readLoggerConfig(
     prefix,
     level: resolveLevel(source["SNAPPER_MCP_LOG_LEVEL"]),
     timestamps: resolveTimestamps(source["SNAPPER_MCP_LOG_TIMESTAMPS"]),
+    format: resolveFormat(source["SNAPPER_MCP_LOG_FORMAT"]),
   };
 }
 
@@ -86,6 +103,53 @@ function formatRest(rest: readonly unknown[]): string {
   return ` ${parts.join(" ")}`;
 }
 
+function jsonSafeRest(rest: readonly unknown[]): unknown[] {
+  return rest.map(value => {
+    if (value instanceof Error) {
+      return { name: value.name, message: value.message, stack: value.stack ?? null };
+    }
+    try {
+      JSON.stringify(value);
+
+      return value;
+    } catch {
+      return String(value);
+    }
+  });
+}
+
+function formatJsonLine(
+  level: LogLevel,
+  prefix: string,
+  message: string,
+  rest: readonly unknown[],
+): string {
+  const record: Record<string, unknown> = {
+    t: new Date().toISOString(),
+    lvl: level,
+    prefix,
+    msg: message,
+  };
+
+  if (rest.length > 0) {
+    record["rest"] = jsonSafeRest(rest);
+  }
+
+  return `${JSON.stringify(record)}\n`;
+}
+
+function formatTextLine(
+  level: LogLevel,
+  prefix: string,
+  message: string,
+  rest: readonly unknown[],
+  timestamps: boolean,
+): string {
+  const ts = timestamps ? `${new Date().toISOString()} ` : "";
+
+  return `${ts}[${prefix}] ${level.toUpperCase()} ${message}${formatRest(rest)}\n`;
+}
+
 export function createLogger(config: LoggerConfig): Logger;
 export function createLogger(prefix: string, source?: NodeJS.ProcessEnv): Logger;
 export function createLogger(
@@ -100,8 +164,11 @@ export function createLogger(
 
   function emit(level: LogLevel, message: string, rest: readonly unknown[]): void {
     if (LEVEL_ORDER[level] < minLevel) return;
-    const ts = config.timestamps ? `${new Date().toISOString()} ` : "";
-    const line = `${ts}[${config.prefix}] ${level.toUpperCase()} ${message}${formatRest(rest)}\n`;
+    const line =
+      config.format === "json"
+        ? formatJsonLine(level, config.prefix, message, rest)
+        : formatTextLine(level, config.prefix, message, rest, config.timestamps);
+
     process.stderr.write(line);
   }
 
