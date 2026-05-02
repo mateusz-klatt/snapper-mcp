@@ -169,6 +169,34 @@ The watch session mints a one-shot WebSocket token via
 `POST /api/auth/ws_token` using the same `SNAPPER_ACCESS_TOKEN`
 configured for the proxy.
 
+## Check subcommand
+
+`snapper-mcp check` runs an offline diagnostic on the configured
+access token + base URL — no network. Useful for validating the
+contents of `SNAPPER_ACCESS_TOKEN` (sub, role, scopes, expiry)
+without burning the token on a failed bridge-up.
+
+```bash
+snapper-mcp check
+# base URL: https://snapper.example.com/api/mcp/
+# access token:
+#   alg: HS256
+#   sub: 01891e92-...
+#   role: AI_DELEGATE
+#   scopes: read.orders, write.orders
+#   exp: 2026-08-01T00:00:00.000Z (in 90.5d)
+#   status: valid
+```
+
+Exit codes:
+
+- `0` — token decoded, base URL parsed, expiry OK.
+- `1` — env validation failed (missing or malformed inputs).
+- `2` — token decoded but is already expired or has no `exp` claim.
+
+The same `--config=PATH`, `--access-token`, and `--base-url` flags
+the proxy + watch subcommands accept also work for `check`.
+
 ## Plugin monitor entry
 
 The plugin manifest's `monitors[]` block auto-spawns

@@ -11,9 +11,11 @@ const SRC_DIR = resolve(process.argv[2] ?? "src");
  * proxy bridge:
  *
  *   - index.ts — entry shim that dispatches subcommands; the watch
- *     subcommand needs the real stdout reference.
+ *     and check subcommands need the real stdout reference.
  *   - watch.ts — emits JSONL frames to the Claude Code Monitor
  *     primitive; stdout is the documented contract for that flow.
+ *   - check.ts — emits the human-readable diagnostic report on
+ *     stdout so operators can pipe / capture the output.
  *
  * The allowlist is keyed by relative path rather than basename so a
  * future `src/foo/watch.ts` cannot accidentally inherit the
@@ -21,7 +23,7 @@ const SRC_DIR = resolve(process.argv[2] ?? "src");
  * legitimate use of those methods, and the logger module is the
  * single source of stderr writes.
  */
-const STDOUT_ALLOWLIST = new Set(["index.ts", "watch.ts"]);
+const STDOUT_ALLOWLIST = new Set(["index.ts", "watch.ts", "check.ts"]);
 
 async function* walk(dir) {
   for (const entry of await readdir(dir, { withFileTypes: true })) {
