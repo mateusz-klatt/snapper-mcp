@@ -17,19 +17,10 @@
 
 import { parseCliFlags, loadConfigFile, resolveBridgeEnv, EnvValidationError } from "./env.js";
 
-import type { Logger } from "./logger.js";
-
 interface JwtParts {
   readonly header: Record<string, unknown>;
   readonly payload: Record<string, unknown>;
 }
-
-const NOOP_LOGGER: Logger = {
-  debug: () => undefined,
-  info: () => undefined,
-  warn: () => undefined,
-  error: () => undefined,
-};
 
 const EXIT_OK = 0;
 const EXIT_ENV = 1;
@@ -153,9 +144,9 @@ export async function checkMain(args: CheckMainArgs): Promise<number> {
   let configFile = null;
   try {
     if (flags.configPath !== null) {
-      configFile = await loadConfigFile(flags.configPath, NOOP_LOGGER);
+      configFile = await loadConfigFile(flags.configPath);
     }
-    const bridgeEnv = resolveBridgeEnv(env, flags, configFile, NOOP_LOGGER);
+    const bridgeEnv = resolveBridgeEnv(env, flags, configFile);
     stdout.write(`base URL: ${bridgeEnv.baseUrl.toString()}\n`);
     let parts: JwtParts;
     try {
