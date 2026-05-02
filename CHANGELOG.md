@@ -5,6 +5,27 @@ All notable changes to `@mateusz-klatt/snapper-mcp` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] — 2026-05-02
+
+### New env var
+
+`SNAPPER_MCP_LOG_FORMAT=json` switches every stderr log line to a
+single-line JSON object so an operator can pipe stderr through `jq`
+or other structured-log consumers:
+
+```text
+{"t":"2026-05-02T16:00:00.000Z","lvl":"info","prefix":"bridge","msg":"connected","rest":[{"req":42}]}
+```
+
+The `t` field is always present in JSON mode regardless of
+`SNAPPER_MCP_LOG_TIMESTAMPS` — the timestamp env var only governs
+the prefix on text-mode lines. `Error` instances in the rest
+arguments serialise as `{name, message, stack}`; circular objects
+fall back to `String(value)` rather than throwing.
+
+Default `text` keeps the human-readable one-line-per-event format
+unchanged for the common Claude Desktop use case.
+
 ## [0.9.0] — 2026-05-02
 
 ### New subcommand

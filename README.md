@@ -139,6 +139,24 @@ diagnostics (URL, HTTP status, error_code). Valid levels:
 `debug` / `info` (default) / `warn` / `error`. Timestamps in the log
 prefix: `SNAPPER_MCP_LOG_TIMESTAMPS=1`.
 
+For structured-log pipelines, set `SNAPPER_MCP_LOG_FORMAT=json` to
+switch every stderr line to a single-line JSON object:
+
+```text
+{"t":"2026-05-02T16:00:00.000Z","lvl":"info","prefix":"bridge","msg":"connected","rest":[{"req":42}]}
+```
+
+The `t` field is always present in JSON mode regardless of
+`SNAPPER_MCP_LOG_TIMESTAMPS`. Pipe through `jq` for filtering:
+
+```bash
+npx -y @mateusz-klatt/snapper-mcp 2>&1 | jq 'select(.lvl=="error")'
+```
+
+`Error` instances in the rest arguments serialise as `{name, message,
+stack}`; circular objects fall back to `String(value)` rather than
+throwing.
+
 ## Authentication
 
 On every outbound HTTP request, the bridge injects
