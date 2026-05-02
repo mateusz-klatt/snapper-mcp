@@ -274,6 +274,8 @@ describe("dedupKeyOf — control frames return null", () => {
       wallet_public_id: "wal-1",
       operator_public_id: null,
       user_public_id: null,
+      ai_review_public_id: null,
+      ai_review_dispatch_version: null,
     };
     expect(dedupKeyOf(frame)).toBeNull();
   });
@@ -344,6 +346,8 @@ describe("ServerFrame discriminator coverage", () => {
         wallet_public_id: "wal-1",
         operator_public_id: null,
         user_public_id: null,
+        ai_review_public_id: null,
+        ai_review_dispatch_version: null,
       },
       {
         ...ENVELOPE,
@@ -382,6 +386,8 @@ describe("hasTopic — runtime narrowing guard", () => {
       wallet_public_id: "wal-1",
       operator_public_id: null,
       user_public_id: null,
+      ai_review_public_id: null,
+      ai_review_dispatch_version: null,
     };
     expect(hasTopic(stamped)).toBe(true);
   });
@@ -410,6 +416,8 @@ describe("hasTopic — runtime narrowing guard", () => {
       wallet_public_id: "wal-1",
       operator_public_id: null,
       user_public_id: null,
+      ai_review_public_id: null,
+      ai_review_dispatch_version: null,
     };
     expect(hasTopic(unstamped)).toBe(false);
   });
@@ -430,6 +438,8 @@ describe("hasTopic — runtime narrowing guard", () => {
       wallet_public_id: "wal-1",
       operator_public_id: null,
       user_public_id: null,
+      ai_review_public_id: null,
+      ai_review_dispatch_version: null,
     };
     const data: ServerDataFrame = stamped;
     if (hasTopic(data)) {
@@ -456,6 +466,8 @@ describe("hasTopic — runtime narrowing guard", () => {
       wallet_public_id: "wal-1",
       operator_public_id: null,
       user_public_id: null,
+      ai_review_public_id: null,
+      ai_review_dispatch_version: null,
     };
     expect(hasTopic(malformed as SignalFrame)).toBe(false);
   });
