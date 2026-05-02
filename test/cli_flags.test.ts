@@ -6,6 +6,7 @@ const EMPTY_FLAGS: CliFlags = {
   configPath: null,
   accessToken: null,
   baseUrl: null,
+  profile: null,
 };
 
 describe("parseCliFlags", () => {
@@ -31,6 +32,7 @@ describe("parseCliFlags", () => {
       configPath: "/tmp/env.json",
       accessToken: "access",
       baseUrl: "https://snapper.example.com/api/mcp",
+      profile: null,
     });
     expect(result.remaining).toEqual([]);
   });
@@ -48,6 +50,7 @@ describe("parseCliFlags", () => {
       configPath: "/tmp/env.json",
       accessToken: "access",
       baseUrl: "https://snapper.example.com/api/mcp",
+      profile: null,
     });
     expect(result.remaining).toEqual([]);
   });
