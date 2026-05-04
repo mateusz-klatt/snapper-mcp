@@ -15,7 +15,7 @@
  *   - 2: token decoded but is already expired or has no `exp` claim.
  */
 
-import { parseCliFlags, loadConfigFile, resolveBridgeEnv, EnvValidationError } from "./env.js";
+import { parseCliFlags, loadConfigFile, resolveBridgeEnv } from "./env.js";
 
 interface JwtParts {
   readonly header: Record<string, unknown>;
@@ -159,12 +159,7 @@ export async function checkMain(args: CheckMainArgs): Promise<number> {
     const expired = reportToken(parts.payload, parts.header, now, stdout);
     return expired ? EXIT_EXPIRED : EXIT_OK;
   } catch (err) {
-    let message: string;
-    if (err instanceof EnvValidationError || err instanceof Error) {
-      message = err.message;
-    } else {
-      message = String(err);
-    }
+    const message = err instanceof Error ? err.message : String(err);
     stderr.write(`snapper-mcp check: ${message}\n`);
     return EXIT_ENV;
   }
