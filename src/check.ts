@@ -159,7 +159,12 @@ export async function checkMain(args: CheckMainArgs): Promise<number> {
     const expired = reportToken(parts.payload, parts.header, now, stdout);
     return expired ? EXIT_EXPIRED : EXIT_OK;
   } catch (err) {
-    const message = err instanceof EnvValidationError ? err.message : err instanceof Error ? err.message : String(err);
+    let message: string;
+    if (err instanceof EnvValidationError || err instanceof Error) {
+      message = err.message;
+    } else {
+      message = String(err);
+    }
     stderr.write(`snapper-mcp check: ${message}\n`);
     return EXIT_ENV;
   }
