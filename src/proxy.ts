@@ -122,6 +122,12 @@ const FORWARD_METHODS: readonly ForwardEntry[] = [
   { gate: { kind: "family", family: "completions" }, schema: CompleteRequestSchema, method: "completion/complete" },
 ];
 
+const MIRRORED_CAPABILITY_FAMILIES: ReadonlySet<string> = new Set(
+  FORWARD_METHODS.flatMap((entry) =>
+    entry.gate.kind === "family" || entry.gate.kind === "sub" ? [entry.gate.family] : [],
+  ),
+);
+
 function hasCapability(capabilities: ServerCapabilities, gate: CapabilityGate): boolean {
   if (gate.kind === "always") return true;
   const value = (capabilities as Record<string, unknown>)[gate.family];
@@ -142,16 +148,10 @@ function hasCapability(capabilities: ServerCapabilities, gate: CapabilityGate): 
 export function supportedMirroredCapabilities(
   backend: ServerCapabilities,
 ): ServerCapabilities {
-  const families = new Set<string>();
-  for (const entry of FORWARD_METHODS) {
-    if (entry.gate.kind === "family" || entry.gate.kind === "sub") {
-      families.add(entry.gate.family);
-    }
-  }
   const result: ServerCapabilities = {};
   const asRecord = backend as Record<string, unknown>;
   const asWritable = result as Record<string, unknown>;
-  for (const family of families) {
+  for (const family of MIRRORED_CAPABILITY_FAMILIES) {
     const value = asRecord[family];
     if (value !== undefined) {
       asWritable[family] = value;
