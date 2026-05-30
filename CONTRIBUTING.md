@@ -18,7 +18,7 @@ npm run stdout-gate
 npm test
 ```
 
-Minimum Node version is `>=22.0.0` (matches Claude Desktop's embedded Node and vitest 4's `node:util` usage).
+Minimum Node version is `>=26.0.0` (matches package engines and the CI matrix).
 
 ## Integration test against a local Snapper instance
 
