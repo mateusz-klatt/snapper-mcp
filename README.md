@@ -100,10 +100,9 @@ npm install -g @mateusz-klatt/snapper-mcp
 SNAPPER_BASE_URL="..." SNAPPER_ACCESS_TOKEN="..." snapper-mcp
 ```
 
-Requires **Node 22+** (uses Node's built-in `fetch`, `AbortController`,
+Requires **Node 26+** (uses Node's built-in `fetch`, `AbortController`,
 and ESM top-level `await`). CI validates the declared minimum
-(Node 22) across Ubuntu / macOS / Windows; higher Node versions work
-because the bridge only relies on APIs stable since Node 18.
+(Node 26) across Ubuntu / macOS / Windows.
 
 ## Configuration
 

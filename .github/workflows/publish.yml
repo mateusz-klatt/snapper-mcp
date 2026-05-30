@@ -27,10 +27,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Setup Node 22
+      - name: Setup Node 26
         uses: actions/setup-node@v6
         with:
-          node-version: "22"
+          node-version: "26"
           registry-url: "https://registry.npmjs.org"
           cache: npm
 
