@@ -70,6 +70,10 @@ export interface OrderEventData extends FrameEnvelope {
   readonly wallet_public_id: string;
   readonly operator_public_id: string | null;
   readonly user_public_id: string | null;
+  readonly paired_group_id: string | null;
+  readonly paired_group_size: number | null;
+  readonly paired_group_index: number | null;
+  readonly paired_group_policy: "simultaneous" | "sequential_handoff" | null;
 }
 
 
@@ -88,6 +92,10 @@ export interface SignalData extends FrameEnvelope {
   readonly user_public_id: string | null;
   readonly ai_review_public_id: string | null;
   readonly ai_review_dispatch_version: number | null;
+  readonly paired_group_id: string | null;
+  readonly paired_group_size: number | null;
+  readonly paired_group_index: number | null;
+  readonly paired_group_policy: "simultaneous" | "sequential_handoff" | null;
 }
 
 
