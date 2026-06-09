@@ -65,7 +65,7 @@ export interface OrderEventData extends FrameEnvelope {
   readonly client_order_id: string;
   readonly exchange: "paper" | "kraken" | "kraken_futures" | "walutomat";
   readonly instrument: string;
-  readonly event: "submitted" | "accepted" | "rejected" | "cancelled" | "expired" | "replaced";
+  readonly event: "submitted" | "accepted" | "rejected" | "cancelled" | "expired" | "replaced" | "unknown";
   readonly reason: string | null;
   readonly wallet_public_id: string;
   readonly operator_public_id: string | null;
