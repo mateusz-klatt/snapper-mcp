@@ -21,15 +21,16 @@ rate limiting. MCP hosts (Claude Desktop, Claude Code) speak MCP over
 stdin/stdout. `@mateusz-klatt/snapper-mcp` is the stdio ⇄ HTTP bridge that
 makes that conversation work.
 
-It is a **thin** bridge: ~1500 lines of TypeScript, using Node's
-built-in `fetch`, plus `@modelcontextprotocol/sdk` for MCP framing. No
-OAuth, no telemetry. Standalone hosts (Claude Desktop, systemd, plain
-CLI) read credentials from env vars only — nothing on disk. Claude
-Code plugin installs write a `0600`-mode `env.json` into the
-per-plugin `${CLAUDE_PLUGIN_DATA}` directory at proxy startup so the
-auto-spawned monitor process can read its credentials via
-`--config=PATH`; the file is owned by the plugin's data dir and is
-overwritten atomically on every proxy startup.
+It is a **thin** TypeScript bridge using Node's built-in `fetch`, plus
+`@modelcontextprotocol/sdk` for MCP framing. No OAuth, no telemetry.
+Standalone hosts (Claude Desktop, systemd, plain CLI) can provide
+credentials through CLI flags, a hardened `--config` JSON file, or
+environment variables. Claude Code plugin installs write a
+`0600`-mode `env.json` into the per-plugin `${CLAUDE_PLUGIN_DATA}`
+directory at proxy startup so the auto-spawned monitor process can
+read its credentials via `--config=PATH`; the file is owned by the
+plugin's data dir and is overwritten atomically on every proxy
+startup.
 
 ## Install
 
@@ -106,7 +107,7 @@ and ESM top-level `await`). CI validates the declared minimum
 
 ## Configuration
 
-Two environment variables. The MCP host must set them before spawning:
+Two environment variables are the common MCP-host configuration shape:
 
 | Variable | Required? | Purpose |
 | --- | --- | --- |
@@ -114,6 +115,13 @@ Two environment variables. The MCP host must set them before spawning:
 | `SNAPPER_ACCESS_TOKEN` | yes | Long-lived AI delegate JWT for Bearer auth (generated in Snapper UI). The same token authenticates both the proxy MCP server and the watch monitor. |
 
 See [`.env.example`](./.env.example) for placeholder values.
+
+Direct CLI runs also accept `--base-url`, `--access-token`, and
+`--config=PATH`. Resolution order is CLI flags, then a JSON config
+file, then environment variables. Config files can contain the same
+top-level `SNAPPER_BASE_URL` / `SNAPPER_ACCESS_TOKEN` keys shown
+above; on POSIX systems the bridge refuses world-writable files and
+warns when the file is group- or world-readable.
 
 ### Multi-profile support
 
@@ -131,6 +139,8 @@ When a profile is selected, the bridge reads
 `SNAPPER_PROFILE_<UPPER>_ACCESS_TOKEN` instead of the bare top-level
 vars (hard isolation — no accidental cross-profile fallback). Profile
 names match `^[a-z0-9]{1,32}$`. CLI flag wins over env var.
+CLI `--base-url` / `--access-token` flags still override the selected
+profile; otherwise config/env lookup is profile-scoped.
 
 The `--config` JSON file may carry a `profiles` block:
 
@@ -152,7 +162,7 @@ snapper-mcp check --profile=prod
 ## Generating tokens
 
 Snapper ships a **Settings → AI Delegates** UI that issues credentials.
-Each delegate emits a single long-lived (~10-year) access JWT. Paste
+Each delegate emits a single long-lived (~3-month / 90-day) access JWT. Paste
 the value into `SNAPPER_ACCESS_TOKEN`; the same token powers both the
 proxy MCP server and the optional push-wakeup monitor.
 
