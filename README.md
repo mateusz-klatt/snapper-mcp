@@ -166,10 +166,12 @@ Each delegate emits a single long-lived (~3-month / 90-day) access JWT. Paste
 the value into `SNAPPER_ACCESS_TOKEN`; the same token powers both the
 proxy MCP server and the optional push-wakeup monitor.
 
-Each delegate has configurable caps (per-order max USD value, per-day /
-per-month ceilings, allowed order types). Tokens are bound to the
-delegate's permissions + wallet scope; revoke the delegate in-place via
-`POST /api/ai-delegates/{id}/deactivate` to kill the bridge live.
+Each delegate has configurable caps: per-instrument quantity,
+max open orders, rolling 24h USD notional, and 60-second cancel rate.
+Tokens are bound to the delegate's permissions + wallet scope; revoke
+the delegate in-place via `POST /api/ai-delegates/{id}/deactivate` to
+revoke the backend token inventory and evict verify caches via
+`admin.user_deactivated`.
 
 ## Logging
 
@@ -234,17 +236,19 @@ configured for the proxy.
 
 `snapper-mcp check` runs an offline diagnostic on the configured
 access token + base URL — no network. Useful for validating the
-contents of `SNAPPER_ACCESS_TOKEN` (sub, role, scopes, expiry)
-without burning the token on a failed bridge-up.
+contents of `SNAPPER_ACCESS_TOKEN` (sub, role, expiry, and any
+`scope`/`scopes` claim present) without burning the token on a failed
+bridge-up. This is an offline decode only; server-side signature,
+inventory revocation, wallet scope, and permission checks still happen
+on the Snapper backend.
 
 ```bash
 snapper-mcp check
 # base URL: https://snapper.example.com/api/mcp/
 # access token:
 #   alg: HS256
-#   sub: 01891e92-...
-#   role: AI_DELEGATE
-#   scopes: read.orders, write.orders
+#   sub: ai-claudedesktop-a1b2c3
+#   role: ai_delegate
 #   exp: 2026-08-01T00:00:00.000Z (in 90.5d)
 #   status: valid
 ```
