@@ -1,17 +1,14 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { createLogger, readLoggerConfig } from "../src/logger.js";
+import { createLogger, readLoggerConfig, setStderrWriterForTests } from "../src/logger.js";
 
 function captureStderr(): { lines: string[]; restore: () => void } {
   const writes: string[] = [];
-  const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
-    writes.push(typeof chunk === "string" ? chunk : String(chunk));
-    return true;
-  });
+  setStderrWriterForTests((line) => writes.push(line));
   return {
     lines: writes,
     restore: () => {
-      spy.mockRestore();
+      setStderrWriterForTests(undefined);
     },
   };
 }

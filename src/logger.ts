@@ -27,6 +27,8 @@
  * at build-output level.
  */
 
+import * as fs from "node:fs";
+
 export type LogLevel = "debug" | "info" | "warn" | "error";
 export type LogFormat = "text" | "json";
 
@@ -49,6 +51,14 @@ export interface LoggerConfig {
   readonly level: LogLevel;
   readonly timestamps: boolean;
   readonly format: LogFormat;
+}
+
+type StderrWriter = (line: string) => void;
+
+let stderrWriterOverride: StderrWriter | undefined;
+
+export function setStderrWriterForTests(writer: StderrWriter | undefined): void {
+  stderrWriterOverride = writer;
 }
 
 function resolveLevel(raw: string | undefined): LogLevel {
@@ -150,6 +160,19 @@ function formatTextLine(
   return `${ts}[${prefix}] ${level.toUpperCase()} ${message}${formatRest(rest)}\n`;
 }
 
+export function writeStderr(line: string): void {
+  if (stderrWriterOverride !== undefined) {
+    stderrWriterOverride(line);
+    return;
+  }
+
+  try {
+    fs.writeSync(2, line);
+  } catch {
+    process.stderr.write(line);
+  }
+}
+
 export function createLogger(config: LoggerConfig): Logger;
 export function createLogger(prefix: string, source?: NodeJS.ProcessEnv): Logger;
 export function createLogger(
@@ -169,7 +192,7 @@ export function createLogger(
         ? formatJsonLine(level, config.prefix, message, rest)
         : formatTextLine(level, config.prefix, message, rest, config.timestamps);
 
-    process.stderr.write(line);
+    writeStderr(line);
   }
 
   return {

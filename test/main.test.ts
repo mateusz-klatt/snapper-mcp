@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import { makeMockSnapperServer, type MockSnapperServer } from "./helpers/mock_snapper_server.js";
+import { CAN_LISTEN_ON_LOOPBACK } from "./helpers/listen_capability.js";
 
 const DIST_ENTRY = resolve(__dirname, "..", "dist", "index.js");
 
@@ -81,7 +82,7 @@ function spawnBridge(
     async stop(signal: NodeJS.Signals = "SIGTERM") {
       if (child.exitCode !== null) return child.exitCode;
       child.kill(signal);
-      const [code] = (await once(child, "exit")) as [number | null];
+      const [code] = (await once(child, "close")) as [number | null];
       rl.close();
       return code;
     },
@@ -100,7 +101,7 @@ describe("bridge subprocess — env failure paths", () => {
     });
     const stderrChunks: string[] = [];
     child.stderr.on("data", (chunk: Buffer) => stderrChunks.push(chunk.toString("utf8")));
-    const [code] = (await once(child, "exit")) as [number | null];
+    const [code] = (await once(child, "close")) as [number | null];
     expect(code).toBe(1);
     expect(stderrChunks.join("")).toMatch(/SNAPPER_BASE_URL/);
   });
@@ -116,7 +117,7 @@ describe("bridge subprocess — env failure paths", () => {
     });
     const stderrChunks: string[] = [];
     child.stderr.on("data", (chunk: Buffer) => stderrChunks.push(chunk.toString("utf8")));
-    const [code] = (await once(child, "exit")) as [number | null];
+    const [code] = (await once(child, "close")) as [number | null];
     expect(code).toBe(1);
     expect(stderrChunks.join("")).toMatch(/not a valid URL/);
   });
@@ -132,7 +133,7 @@ describe("bridge subprocess — env failure paths", () => {
     });
     const stderrChunks: string[] = [];
     child.stderr.on("data", (chunk: Buffer) => stderrChunks.push(chunk.toString("utf8")));
-    const [code] = (await once(child, "exit")) as [number | null];
+    const [code] = (await once(child, "close")) as [number | null];
     expect(code).toBe(1);
     expect(stderrChunks.join("")).toMatch(/SNAPPER_ACCESS_TOKEN/);
   });
@@ -148,14 +149,14 @@ describe("bridge subprocess — env failure paths", () => {
     });
     const stderrChunks: string[] = [];
     child.stderr.on("data", (chunk: Buffer) => stderrChunks.push(chunk.toString("utf8")));
-    const [code] = (await once(child, "exit")) as [number | null];
+    const [code] = (await once(child, "close")) as [number | null];
     expect(code).toBe(1);
     const stderr = stderrChunks.join("");
     expect(stderr).toMatch(/MCP handshake to Snapper failed at startup/);
   });
 });
 
-describe("bridge subprocess — MCP lifecycle end-to-end", () => {
+describe.skipIf(!CAN_LISTEN_ON_LOOPBACK)("bridge subprocess — MCP lifecycle end-to-end", () => {
   let server: MockSnapperServer;
 
   beforeAll(async () => {
