@@ -1,7 +1,9 @@
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { setStderrWriterForTests } from "../src/logger.js";
 import { main, resolvePackageName, resolvePackageVersion } from "../src/main.js";
+import { CAN_LISTEN_ON_LOOPBACK } from "./helpers/listen_capability.js";
 import { makeMockSnapperServer, type MockSnapperServer } from "./helpers/mock_snapper_server.js";
 
 describe("resolvePackageVersion / resolvePackageName", () => {
@@ -18,10 +20,10 @@ describe("resolvePackageVersion / resolvePackageName", () => {
   });
 });
 
-describe("main — in-process lifecycle", () => {
+describe.skipIf(!CAN_LISTEN_ON_LOOPBACK)("main — in-process lifecycle", () => {
   let server: MockSnapperServer;
   let exitSpy: ReturnType<typeof vi.spyOn>;
-  let stderrSpy: ReturnType<typeof vi.spyOn>;
+  let stderrText: string;
 
   beforeAll(async () => {
     server = await makeMockSnapperServer({
@@ -35,12 +37,15 @@ describe("main — in-process lifecycle", () => {
   });
 
   beforeEach(() => {
-    stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    stderrText = "";
+    setStderrWriterForTests((line) => {
+      stderrText += line;
+    });
   });
 
   afterEach(() => {
     exitSpy?.mockRestore();
-    stderrSpy.mockRestore();
+    setStderrWriterForTests(undefined);
   });
 
   function baseEnv(overrides: Partial<Record<string, string | undefined>> = {}): NodeJS.ProcessEnv {
@@ -56,9 +61,6 @@ describe("main — in-process lifecycle", () => {
     const [stdioTransport] = InMemoryTransport.createLinkedPair();
     await main({ source: baseEnv(), argv: [], stdioTransport, install: false });
 
-    const stderrText = stderrSpy.mock.calls
-      .map((args) => (typeof args[0] === "string" ? args[0] : String(args[0])))
-      .join("");
     expect(stderrText).toContain("bridging stdio");
     expect(stderrText).toContain("snapper");
   });
@@ -116,9 +118,6 @@ describe("main — in-process lifecycle", () => {
     const env = baseEnv({ SNAPPER_BASE_URL: undefined });
     await expect(main({ source: env, argv: [], install: false })).rejects.toThrow("exit(1)");
     expect(exitSpy).toHaveBeenCalledWith(1);
-    const stderrText = stderrSpy.mock.calls
-      .map((args) => (typeof args[0] === "string" ? args[0] : String(args[0])))
-      .join("");
     expect(stderrText).toContain("SNAPPER_BASE_URL");
   });
 
@@ -130,9 +129,6 @@ describe("main — in-process lifecycle", () => {
       main({ source: baseEnv(), argv: ["--topic", "signals."], install: false }),
     ).rejects.toThrow("exit(1)");
     expect(exitSpy).toHaveBeenCalledWith(1);
-    const stderrText = stderrSpy.mock.calls
-      .map((args) => (typeof args[0] === "string" ? args[0] : String(args[0])))
-      .join("");
     expect(stderrText).toContain("Unknown argument");
     expect(stderrText).toContain("--topic");
   });
@@ -145,9 +141,6 @@ describe("main — in-process lifecycle", () => {
     await expect(
       main({ source: baseEnv(), argv: [`--secret=${token}`], install: false }),
     ).rejects.toThrow("exit(1)");
-    const stderrText = stderrSpy.mock.calls
-      .map((args) => (typeof args[0] === "string" ? args[0] : String(args[0])))
-      .join("");
     expect(stderrText).toContain("<jwt-");
     expect(stderrText).not.toContain(token);
   });
@@ -174,9 +167,6 @@ describe("main — in-process lifecycle", () => {
     const deadEnv = baseEnv({ SNAPPER_BASE_URL: "http://127.0.0.1:1/api/mcp/" });
     await expect(main({ source: deadEnv, argv: [], install: false })).rejects.toThrow();
     expect(exitSpy).toHaveBeenCalledWith(1);
-    const stderrText = stderrSpy.mock.calls
-      .map((args) => (typeof args[0] === "string" ? args[0] : String(args[0])))
-      .join("");
     expect(stderrText).toContain("MCP handshake to Snapper failed at startup");
   });
 

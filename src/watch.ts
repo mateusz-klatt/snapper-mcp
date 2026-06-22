@@ -73,7 +73,7 @@ import {
 } from "./env.js";
 import { EnvelopeMinter } from "./envelope.js";
 import { EnvValidationError } from "./errors.js";
-import { createLogger, type Logger } from "./logger.js";
+import { createLogger, writeStderr, type Logger } from "./logger.js";
 import { TokenStore } from "./token_store.js";
 import { fetchWsToken, type WsTokenResult } from "./ws_token.js";
 import {
@@ -240,7 +240,7 @@ export async function watchMain(options: WatchOptions = {}): Promise<void> {
     args = parseWatchArgs(argv);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    process.stderr.write(`[${CLIENT_NAME} watch] ${message}\n`);
+    writeStderr(`[${CLIENT_NAME} watch] ${message}\n`);
     process.exit(1);
     return;
   }
@@ -254,7 +254,7 @@ export async function watchMain(options: WatchOptions = {}): Promise<void> {
     setup = buildWatchSetup(args, options, sink, env, logger);
   } catch (err) {
     if (!(err instanceof EnvValidationError)) throw err;
-    process.stderr.write(`[${CLIENT_NAME} watch] ${err.message}\n`);
+    writeStderr(`[${CLIENT_NAME} watch] ${err.message}\n`);
     process.exit(1);
     return;
   }

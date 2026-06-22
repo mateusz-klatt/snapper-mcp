@@ -13,8 +13,10 @@ import {
   type ConnectionScript,
   type MockWsServer,
 } from "./helpers/mock_ws_server.js";
+import { CAN_LISTEN_ON_LOOPBACK } from "./helpers/listen_capability.js";
 
 const SILENT_LOGGER = createLogger({ prefix: "ws-client-test", level: "error", timestamps: false });
+const describeWithTcp = CAN_LISTEN_ON_LOOPBACK ? describe : describe.skip;
 
 function envelopeStub(extra: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -132,7 +134,7 @@ afterEach(async () => {
   activeServers = [];
 });
 
-describe("ws_client — happy path lifecycle", () => {
+describeWithTcp("ws_client — happy path lifecycle", () => {
   it("connects, authenticates, subscribes, and forwards a data frame", async () => {
     const server = await startServer([happyPathScript()]);
     const onFrame = vi.fn<(frame: ServerFrame) => void>();
@@ -261,7 +263,7 @@ describe("ws_client — happy path lifecycle", () => {
   });
 });
 
-describe("ws_client — heartbeat", () => {
+describeWithTcp("ws_client — heartbeat", () => {
   it("emits ping frames at the configured cadence", async () => {
     const server = await startServer([happyPathScript()]);
     const client = createWsClient(makeOptions(server, { heartbeatIntervalMs: 30 }));
@@ -274,7 +276,7 @@ describe("ws_client — heartbeat", () => {
   });
 });
 
-describe("ws_client — failure paths during handshake", () => {
+describeWithTcp("ws_client — failure paths during handshake", () => {
   it("rejects via session error when server fails to send auth_required in time", async () => {
     const server = await startServer([{}]);
     const client = createWsClient(
@@ -422,7 +424,7 @@ describe("ws_client — failure paths during handshake", () => {
   });
 });
 
-describe("ws_client — reauth flow", () => {
+describeWithTcp("ws_client — reauth flow", () => {
   it("ignores unsolicited reauth_ok frames when no reauth is pending", async () => {
     const script: ConnectionScript = {
       onConnect: (socket) => {
@@ -655,7 +657,7 @@ describe("ws_client — reauth flow", () => {
   });
 });
 
-describe("ws_client — auth_expired triggers reconnect", () => {
+describeWithTcp("ws_client — auth_expired triggers reconnect", () => {
   it("on auth_expired, closes the socket and re-authenticates the next session", async () => {
     const expiredScript: ConnectionScript = {
       onConnect: (socket) => {
@@ -686,7 +688,7 @@ describe("ws_client — auth_expired triggers reconnect", () => {
   });
 });
 
-describe("ws_client — AI-review dedup + size guards", () => {
+describeWithTcp("ws_client — AI-review dedup + size guards", () => {
   function reviewFrame(version: number, deadlineIso: string): Record<string, unknown> {
     return {
       type: "ai_review.request",
@@ -966,7 +968,7 @@ describe("ws_client — AI-review dedup + size guards", () => {
   });
 });
 
-describe("ws_client — periodic dedup pruning", () => {
+describeWithTcp("ws_client — periodic dedup pruning", () => {
   it("re-delivers an expired AI-review after the prune timer evicts it", async () => {
     const server = await startServer([happyPathScript()]);
     const onFrame = vi.fn<(frame: ServerFrame) => void>();
@@ -1077,7 +1079,7 @@ describe("ws_client — periodic dedup pruning", () => {
   });
 });
 
-describe("ws_client — close()", () => {
+describeWithTcp("ws_client — close()", () => {
   it("close() before run() resolves immediately and run() returns", async () => {
     const server = await startServer([]);
     const client = createWsClient(makeOptions(server));
@@ -1193,7 +1195,7 @@ describe("ws_client — close()", () => {
   });
 });
 
-describe("ws_client — runs with all defaults applied", () => {
+describeWithTcp("ws_client — runs with all defaults applied", () => {
   it("connects successfully when no optional overrides are provided", async () => {
     const server = await startServer([happyPathScript()]);
     const client = createWsClient({
@@ -1217,7 +1219,7 @@ describe("ws_client — runs with all defaults applied", () => {
   });
 });
 
-describe("ws_client — runner failure propagation", () => {
+describeWithTcp("ws_client — runner failure propagation", () => {
   it("preserves Error instances from runner startup failures", async () => {
     const server = await startServer([]);
     const setIntervalSpy = vi.spyOn(globalThis, "setInterval").mockImplementationOnce(() => {
@@ -1265,7 +1267,7 @@ describe("ws_client — toBuffer", () => {
   });
 });
 
-describe("ws_client — close-before-open via injected socket", () => {
+describeWithTcp("ws_client — close-before-open via injected socket", () => {
   it("waitForOpen rejects when the socket emits close before open", async () => {
     const server = await startServer([]);
     const fakeFactory = (): WebSocket => {
@@ -1351,7 +1353,7 @@ describe("ws_client — close-before-open via injected socket", () => {
   });
 });
 
-describe("ws_client — formatError String fallback for non-Error reauth failure", () => {
+describeWithTcp("ws_client — formatError String fallback for non-Error reauth failure", () => {
   it("logs the stringified non-Error rejection from fetchWsToken during reauth", async () => {
     const reauthScript: ConnectionScript = {
       onConnect: (socket) => {
@@ -1409,7 +1411,7 @@ describe("ws_client — formatError String fallback for non-Error reauth failure
   });
 });
 
-describe("ws_client — counter envelope minting", () => {
+describeWithTcp("ws_client — counter envelope minting", () => {
   it("authenticate, subscribe, ping, and reauth carry monotonically increasing sequence_ids on the right counters", async () => {
     const reauthScript: ConnectionScript = {
       onConnect: (socket) => {

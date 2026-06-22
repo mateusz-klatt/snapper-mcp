@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { TokenStore } from "../src/token_store.js";
+import { setStderrWriterForTests } from "../src/logger.js";
 import type { ServerFrame } from "../src/types.js";
 import {
   parseWatchArgs,
@@ -15,6 +16,7 @@ import {
   type WatchOptions,
 } from "../src/watch.js";
 import type { WsClient, WsClientOptions } from "../src/ws_client.js";
+import { CAN_LISTEN_ON_LOOPBACK } from "./helpers/listen_capability.js";
 import { makeMockWsServer, type ConnectionScript } from "./helpers/mock_ws_server.js";
 
 describe("resolvePackageName", () => {
@@ -143,6 +145,20 @@ function baseEnv(overrides: Record<string, string | undefined> = {}): NodeJS.Pro
     SNAPPER_MCP_LOG_LEVEL: "error",
     ...overrides,
   } as NodeJS.ProcessEnv;
+}
+
+function captureStderr(): { text: () => string; restore: () => void } {
+  let text = "";
+  setStderrWriterForTests((line) => {
+    text += line;
+  });
+
+  return {
+    text: () => text,
+    restore: () => {
+      setStderrWriterForTests(undefined);
+    },
+  };
 }
 
 function watchProtocolScript(): ConnectionScript {
@@ -323,18 +339,18 @@ describe("watchMain — lifecycle integration", () => {
 
 describe("watchMain — error paths", () => {
   let exitSpy: ReturnType<typeof vi.spyOn>;
-  let stderrSpy: ReturnType<typeof vi.spyOn>;
+  let stderrCapture: ReturnType<typeof captureStderr> | undefined;
 
   afterEach(() => {
     exitSpy?.mockRestore();
-    stderrSpy?.mockRestore();
+    stderrCapture?.restore();
   });
 
   it("exits 1 with stderr message when argv parsing fails", async () => {
     exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
       throw new Error("exit(1)");
     });
-    stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    stderrCapture = captureStderr();
     await expect(
       watchMain({
         source: baseEnv(),
@@ -343,17 +359,14 @@ describe("watchMain — error paths", () => {
       }),
     ).rejects.toThrow("exit(1)");
     expect(exitSpy).toHaveBeenCalledWith(1);
-    const stderrText = stderrSpy.mock.calls
-      .map((c) => (typeof c[0] === "string" ? c[0] : String(c[0])))
-      .join("");
-    expect(stderrText).toMatch(/end with '\.'/);
+    expect(stderrCapture.text()).toMatch(/end with '\.'/);
   });
 
   it("exits 1 with stderr message when SNAPPER_BASE_URL is missing", async () => {
     exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
       throw new Error("exit(1)");
     });
-    stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    stderrCapture = captureStderr();
     await expect(
       watchMain({
         source: baseEnv({ SNAPPER_BASE_URL: undefined }),
@@ -362,17 +375,14 @@ describe("watchMain — error paths", () => {
       }),
     ).rejects.toThrow("exit(1)");
     expect(exitSpy).toHaveBeenCalledWith(1);
-    const stderrText = stderrSpy.mock.calls
-      .map((c) => (typeof c[0] === "string" ? c[0] : String(c[0])))
-      .join("");
-    expect(stderrText).toMatch(/SNAPPER_BASE_URL/);
+    expect(stderrCapture.text()).toMatch(/SNAPPER_BASE_URL/);
   });
 
   it("exits 1 with diagnostic stderr when run() rejects with a generic error", async () => {
     exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
       throw new Error("exit(1)");
     });
-    stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    stderrCapture = captureStderr();
     const { factory, sessions } = createCapturingFactory();
     const watchPromise = watchMain({
       source: baseEnv(),
@@ -387,17 +397,14 @@ describe("watchMain — error paths", () => {
     });
     sessions[0]?.rejectRun(new Error("websocket exploded"));
     await expect(watchPromise).rejects.toThrow("exit(1)");
-    const stderrText = stderrSpy.mock.calls
-      .map((c) => (typeof c[0] === "string" ? c[0] : String(c[0])))
-      .join("");
-    expect(stderrText).toMatch(/websocket exploded/);
+    expect(stderrCapture.text()).toMatch(/websocket exploded/);
   });
 
   it("uninstalls SIGTERM/SIGINT handlers before exit on a fatal run() rejection", async () => {
     exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
       throw new Error("exit(1)");
     });
-    stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    stderrCapture = captureStderr();
     const { factory, sessions } = createCapturingFactory();
     const signalSource = new FakeSignalSource();
     const watchPromise = watchMain({
@@ -503,7 +510,7 @@ describe("watchMain — error paths", () => {
     await runPromise;
   });
 
-  it("uses the default WsClient factory when none is supplied", async () => {
+  it.skipIf(!CAN_LISTEN_ON_LOOPBACK)("uses the default WsClient factory when none is supplied", async () => {
     const server = await makeMockWsServer([watchProtocolScript()]);
     const signalSource = new FakeSignalSource();
     const fetchMock = vi.fn().mockResolvedValue(
@@ -562,7 +569,7 @@ describe("watchMain — error paths", () => {
     exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
       throw new Error("exit(1)");
     });
-    stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    stderrCapture = captureStderr();
     const { factory, sessions } = createCapturingFactory();
     const watchPromise = watchMain({
       source: baseEnv(),
@@ -598,12 +605,12 @@ describe("watchMain — error paths", () => {
 
 describe("watchMain — config-file startup", () => {
   let exitSpy: ReturnType<typeof vi.spyOn>;
-  let stderrSpy: ReturnType<typeof vi.spyOn>;
+  let stderrCapture: ReturnType<typeof captureStderr> | undefined;
   const roots: string[] = [];
 
   afterEach(async () => {
     exitSpy?.mockRestore();
-    stderrSpy?.mockRestore();
+    stderrCapture?.restore();
     await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
   });
 
@@ -698,7 +705,7 @@ describe("watchMain — config-file startup", () => {
     exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
       throw new Error("exit-was-called");
     });
-    stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    stderrCapture = captureStderr();
     const root = await tempRoot();
     await expect(
       watchMain({
@@ -716,9 +723,7 @@ describe("watchMain — config-file startup", () => {
       }),
     ).rejects.toThrow("exit-was-called");
     expect(exitSpy).toHaveBeenCalledWith(1);
-    const stderrText = stderrSpy.mock.calls
-      .map((c) => (typeof c[0] === "string" ? c[0] : String(c[0])))
-      .join("");
+    const stderrText = stderrCapture.text();
     expect(stderrText).toMatch(/SNAPPER_ACCESS_TOKEN/);
     expect(stderrText).toMatch(/was not found after 1500ms/);
   });

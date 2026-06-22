@@ -1,4 +1,5 @@
 import { checkMain } from "./check.js";
+import { writeStderr } from "./logger.js";
 import { main } from "./main.js";
 import { watchMain } from "./watch.js";
 
@@ -14,6 +15,6 @@ try {
   }
 } catch (err) {
   const message = err instanceof Error ? (err.stack ?? err.message) : String(err);
-  process.stderr.write(`[snapper-mcp] fatal: ${message}\n`);
+  writeStderr(`[snapper-mcp] fatal: ${message}\n`);
   process.exit(1);
 }

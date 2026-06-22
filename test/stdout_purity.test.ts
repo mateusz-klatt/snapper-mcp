@@ -4,6 +4,7 @@ import { createInterface } from "node:readline";
 import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { CAN_LISTEN_ON_LOOPBACK } from "./helpers/listen_capability.js";
 import { makeMockSnapperServer, type MockSnapperServer } from "./helpers/mock_snapper_server.js";
 
 const DIST_ENTRY = resolve(__dirname, "..", "dist", "index.js");
@@ -97,7 +98,7 @@ async function runBridgeInitialize(
   };
 }
 
-describe("stdout byte-purity", () => {
+describe.skipIf(!CAN_LISTEN_ON_LOOPBACK)("stdout byte-purity", () => {
   let server: MockSnapperServer;
 
   beforeAll(async () => {
