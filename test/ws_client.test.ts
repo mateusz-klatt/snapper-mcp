@@ -1085,7 +1085,7 @@ describeWithTcp("ws_client — close()", () => {
     const client = createWsClient(makeOptions(server));
     await client.close();
     await client.close();
-    expect(server.connections.length).toBe(0);
+    expect(server.connections).toHaveLength(0);
   });
 
   it("run() is idempotent while the client is active", async () => {
@@ -1188,7 +1188,7 @@ describeWithTcp("ws_client — close()", () => {
     const client = createWsClient(makeOptions(server));
     const runPromise = client.run();
     await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"));
-    expect(server.connections.length).toBe(1);
+    expect(server.connections).toHaveLength(1);
     await client.close();
     await client.close();
     await runPromise;
