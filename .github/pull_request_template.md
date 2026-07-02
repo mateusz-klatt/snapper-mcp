@@ -19,7 +19,7 @@
 - [ ] `npm run stdout-gate` passes — no forbidden stdout patterns in `src/`.
 - [ ] `npm run build` produces `dist/index.js` with `#!/usr/bin/env node` shebang on line 1.
 - [ ] `npm test` passes (vitest).
-- [ ] CI matrix green across Node 18 / 20 / 22 × ubuntu / macos / windows.
+- [ ] CI matrix green across Node 26 × ubuntu / macos / windows.
 
 ## Additional notes
 
