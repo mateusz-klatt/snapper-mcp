@@ -20,20 +20,25 @@ npm test
 
 Minimum Node version is `>=26.0.0` (matches package engines and the CI matrix).
 
-## Integration test against a local Snapper instance
+## Local Snapper smoke checks
 
 ```bash
 # In a separate terminal, boot a local Snapper backend (e.g. via `make dev-backend` in your Snapper deployment).
 make dev-backend
 
-# Back here, run the manual integration test.
-# The test is NOT in the default CI gate — it requires a live local backend.
+# Back here, verify local bridge configuration.
 SNAPPER_BASE_URL=http://localhost:8000/api/mcp \
   SNAPPER_ACCESS_TOKEN=$(...) \
-  npx vitest run test/integration
+  npm run build
+
+SNAPPER_BASE_URL=http://localhost:8000/api/mcp \
+  SNAPPER_ACCESS_TOKEN=$(...) \
+  node dist/index.js check
 ```
 
-Generate tokens via the Snapper UI's AI Delegates wizard.
+Generate tokens via the Snapper UI's AI Delegates wizard. The tracked
+Vitest suite is local/mock-only; there is no committed live-backend
+integration test directory.
 
 ## Pre-commit hook
 
