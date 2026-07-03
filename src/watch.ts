@@ -100,7 +100,11 @@ const CLIENT_NAME = resolvePackageName(
   (globalThis as BuildTimeGlobals).__PKG_NAME__,
 );
 
-const DEFAULT_TOPICS: readonly string[] = ["signals.", "orders.events."];
+const DEFAULT_TOPICS: readonly string[] = [
+  "signals.",
+  "orders.events.",
+  "ai_reviews.",
+];
 
 export class WatchArgsError extends Error {
   constructor(message: string) {
