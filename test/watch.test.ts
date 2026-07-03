@@ -33,7 +33,7 @@ describe("resolvePackageName", () => {
 describe("parseWatchArgs", () => {
   it("returns the default topic set when no --topic is supplied", () => {
     const args = parseWatchArgs([]);
-    expect(args.topics).toEqual(["signals.", "orders.events."]);
+    expect(args.topics).toEqual(["signals.", "orders.events.", "ai_reviews."]);
   });
 
   it("collects a single --topic value", () => {
@@ -283,7 +283,11 @@ describe("watchMain — lifecycle integration", () => {
       const timer = setTimeout(resolve, 5);
       if (typeof timer.unref === "function") timer.unref();
     });
-    expect(sessions[0]?.options.topics).toEqual(["signals.", "orders.events."]);
+    expect(sessions[0]?.options.topics).toEqual([
+      "signals.",
+      "orders.events.",
+      "ai_reviews.",
+    ]);
     sessions[0]?.resolveRun();
     await runPromise;
   });
@@ -441,7 +445,11 @@ describe("watchMain — error paths", () => {
         const timer = setTimeout(resolve, 5);
         if (typeof timer.unref === "function") timer.unref();
       });
-      expect(sessions[0]?.options.topics).toEqual(["signals.", "orders.events."]);
+      expect(sessions[0]?.options.topics).toEqual([
+        "signals.",
+        "orders.events.",
+        "ai_reviews.",
+      ]);
       sessions[0]?.resolveRun();
       await runPromise;
     } finally {
