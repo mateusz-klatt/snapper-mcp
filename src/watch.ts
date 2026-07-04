@@ -178,6 +178,7 @@ function resolveStdout(opt: WatchOptions["stdout"]): JsonlSink {
   const webStream = opt as Pick<WritableStream, "getWriter">;
   const writer = webStream.getWriter();
   const encoder = new TextEncoder();
+  let pendingWrite: Promise<void> = Promise.resolve();
   return {
     write: (line) => {
       /*
@@ -188,7 +189,12 @@ function resolveStdout(opt: WatchOptions["stdout"]): JsonlSink {
        * frames — those will reject identically, leaving the rest
        * of the lifecycle (reconnect, heartbeat, shutdown) intact.
        */
-      void writer.write(encoder.encode(line)).catch(() => undefined);
+      pendingWrite = pendingWrite
+        .then(
+          () => writer.write(encoder.encode(line)),
+          () => writer.write(encoder.encode(line)),
+        )
+        .catch((): void => undefined);
     },
   };
 }
