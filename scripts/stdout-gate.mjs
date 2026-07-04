@@ -38,7 +38,7 @@ async function* walk(dir) {
 
 const hits = [];
 for await (const file of walk(SRC_DIR)) {
-  const relPath = relative(SRC_DIR, file).split("\\").join("/");
+  const relPath = relative(SRC_DIR, file).replaceAll("\\", "/");
   const allowStdout = STDOUT_ALLOWLIST.has(relPath);
   const pattern = allowStdout
     ? /console\.(log|info|debug|dir|trace|group)/
