@@ -5,6 +5,27 @@ All notable changes to `@mateusz-klatt/snapper-mcp` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] — 2026-07-07
+
+### New: watch monitor subscribes to AI-review requests by default
+
+The `watch` monitor now subscribes to the `ai_reviews.` topic family out of
+the box, so pending AI-review (consult) requests stream to the delegate as
+JSONL alongside signal and order events — no extra flags required.
+
+### Changed
+
+- Node 26 compatibility; dependencies bumped to latest (including majors).
+- Wire-contract regenerated for `paired_group_*` fields, `SignalData.paired_group_key`,
+  and `OrderEventEnum.UNKNOWN`; the retired `zonda` exchange was dropped from the
+  Exchange enum.
+- Proxy caches mirrored capability families for fewer redundant lookups.
+
+### Fixed
+
+- Assorted static-analysis (Sonar) findings in the proxy and watch bridge,
+  including simplified error-message resolution.
+
 ## [0.11.0] — 2026-05-02
 
 ### New: multi-profile support
