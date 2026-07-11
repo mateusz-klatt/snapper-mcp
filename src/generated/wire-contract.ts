@@ -97,6 +97,9 @@ export interface SignalData extends FrameEnvelope {
   readonly paired_group_index: number | null;
   readonly paired_group_policy: "simultaneous" | "sequential_handoff" | null;
   readonly paired_group_key: string | null;
+  readonly origin: "live" | "replay";
+  readonly replay_window_start: string | null;
+  readonly replay_window_end: string | null;
 }
 
 
