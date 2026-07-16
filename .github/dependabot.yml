@@ -27,6 +27,9 @@ updates:
     commit-message:
       prefix: deps
       include: scope
+    ignore:
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /
