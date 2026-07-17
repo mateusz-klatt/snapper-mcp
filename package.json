@@ -72,6 +72,9 @@
     "typescript": "^6.0",
     "vitest": "^4.1"
   },
+  "overrides": {
+    "esbuild": "^0.28.1"
+  },
   "simple-git-hooks": {
     "pre-commit": "npx gitleaks protect --staged -v --config=.gitleaks.toml"
   },
