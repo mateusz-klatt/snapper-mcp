@@ -169,6 +169,39 @@ describeWithTcp("ws_client — happy path lifecycle", () => {
     await runPromise;
   });
 
+  it("forwards an AI-research request to the JSONL consumer", async () => {
+    const server = await startServer([happyPathScript()]);
+    const onFrame = vi.fn<(frame: ServerFrame) => void>();
+    const client = createWsClient(
+      makeOptions(server, { onFrame, topics: ["ai_research."] }),
+    );
+    const runPromise = client.run();
+    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"));
+    const roundPublicId = "0192f000-0000-7000-8000-dddddddddddd";
+    server.emit(0, {
+      type: "ai_research.request",
+      round_public_id: roundPublicId,
+      trigger: "periodic",
+      ...envelopeStub({ topic: `ai_research.${roundPublicId}.request` }),
+    });
+
+    await waitFor(() =>
+      onFrame.mock.calls.some(
+        (call) => (call[0] as { type: string }).type === "ai_research.request",
+      ),
+    );
+    expect(onFrame).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "ai_research.request",
+        round_public_id: roundPublicId,
+        trigger: "periodic",
+      }),
+    );
+    server.closeConnection(0, 1000, "test done");
+    await client.close();
+    await runPromise;
+  });
+
   it("opens with Authorization: Bearer access on the upgrade request", async () => {
     const server = await startServer([happyPathScript()]);
     const store = new TokenStore({ access: "access-bearer", refresh: "refresh-1" });

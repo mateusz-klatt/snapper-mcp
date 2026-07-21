@@ -14,6 +14,13 @@ export interface FrameEnvelope {
 }
 
 
+export interface AiResearchRequestFrameData extends FrameEnvelope {
+  readonly type: "ai_research.request";
+  readonly round_public_id: string;
+  readonly trigger: string;
+}
+
+
 export interface AiReviewCapsViolationFrameData extends FrameEnvelope {
   readonly type: "ai_review.caps_violation";
   readonly review_public_id: string;

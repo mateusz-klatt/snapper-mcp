@@ -13,6 +13,7 @@
  */
 
 import type {
+  AiResearchRequestFrameData,
   AiReviewCapsViolationFrameData,
   AiReviewDecisionAckFrameData,
   AiReviewRequestFrameData,
@@ -73,6 +74,7 @@ export type ControlFrameType = ControlFrame["type"];
 export type AiReviewRequestFrame = AiReviewRequestFrameData;
 export type AiReviewDecisionAckFrame = AiReviewDecisionAckFrameData;
 export type AiReviewCapsViolationFrame = AiReviewCapsViolationFrameData;
+export type AiResearchRequestFrame = AiResearchRequestFrameData;
 export type SignalFrame = SignalData;
 export type OrderEventFrame = OrderEventData;
 
@@ -81,7 +83,7 @@ export type AiReviewFrame =
   | AiReviewDecisionAckFrame
   | AiReviewCapsViolationFrame;
 
-export type GenericDataFrame = SignalFrame | OrderEventFrame;
+export type GenericDataFrame = AiResearchRequestFrame | SignalFrame | OrderEventFrame;
 
 /**
  * Closed union of every server-emitted frame the bridge currently
@@ -101,6 +103,7 @@ export type ServerFrame = ControlFrame | AiReviewFrame | GenericDataFrame;
  * `frame.topic` as a routing key.
  */
 export type ServerDataFrame =
+  | AiResearchRequestFrame
   | AiReviewRequestFrame
   | AiReviewDecisionAckFrame
   | AiReviewCapsViolationFrame
