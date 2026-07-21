@@ -106,7 +106,7 @@ export interface SignalData extends FrameEnvelope {
 export interface WSAuthCompleteResponse extends FrameEnvelope {
   readonly type: "auth_complete";
   readonly available_topics: readonly string[];
-  readonly user_role: "ai_delegate" | "viewer" | "operator" | "admin";
+  readonly user_role: "ai_researcher" | "ai_delegate" | "viewer" | "operator" | "admin";
   readonly session_expires_at: string | null;
   readonly ws_token_exp: string;
 }
