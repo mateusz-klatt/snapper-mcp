@@ -658,6 +658,7 @@ class SessionRunner {
       case "error":
         this.logger.warn(`watch: server error frame: ${frame.message}`);
         return;
+      case "ai_research.request":
       case "signal":
       case "order_event":
         try {

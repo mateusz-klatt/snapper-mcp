@@ -104,6 +104,7 @@ const DEFAULT_TOPICS: readonly string[] = [
   "signals.",
   "orders.events.",
   "ai_reviews.",
+  "ai_research.",
 ];
 
 export class WatchArgsError extends Error {

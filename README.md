@@ -224,11 +224,12 @@ subprocess's stdout) consumes the JSONL stream as push-style wakeup.
 snapper-mcp watch --topic signals. --topic orders.events.
 ```
 
-Default subscription: `signals.`, `orders.events.`, and `ai_reviews.`
-if no `--topic` is given. Each prefix MUST end with `.` to address a
-topic family root. The `ai_reviews.` family carries review-request and
-decision-ack frames, so a monitoring host can wake its consumer the
-moment a review needs attention.
+Default subscription: `signals.`, `orders.events.`, `ai_reviews.`, and
+`ai_research.` if no `--topic` is given. Each prefix MUST end with `.` to
+address a topic family root. The `ai_reviews.` family carries review-request
+and decision-ack frames, while `ai_research.` carries committed research-round
+wakes. A monitoring host can therefore wake its consumer when either kind of
+work needs attention.
 
 The watch session mints a one-shot WebSocket token via
 `POST /api/auth/ws_token` using the same `SNAPPER_ACCESS_TOKEN`
