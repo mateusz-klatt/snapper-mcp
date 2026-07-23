@@ -126,8 +126,7 @@ describe("loadConfigFile", () => {
     await expect(loadConfigFile(filePath, testLogger())).rejects.toBeInstanceOf(EnvValidationError);
   });
 
-  it("throws when the file is world-writable on POSIX", async () => {
-    if (process.platform === "win32") return;
+  it.skipIf(process.platform === "win32")("throws when the file is world-writable on POSIX", async () => {
     const root = await tempRoot();
     roots.push(root);
     const filePath = path.join(root, "env.json");
@@ -136,16 +135,18 @@ describe("loadConfigFile", () => {
     await expect(loadConfigFile(filePath, testLogger())).rejects.toBeInstanceOf(EnvValidationError);
   });
 
-  it("loads a Windows-style file without applying POSIX mode-bit hardening", async () => {
-    if (process.platform !== "win32") return;
-    const root = await tempRoot();
-    roots.push(root);
-    const filePath = path.join(root, "env.json");
-    await writeJson(filePath, { SNAPPER_ACCESS_TOKEN: "access" });
-    await expect(loadConfigFile(filePath, testLogger())).resolves.toEqual({
-      SNAPPER_ACCESS_TOKEN: "access",
-    });
-  });
+  it.skipIf(process.platform !== "win32")(
+    "loads a Windows-style file without applying POSIX mode-bit hardening",
+    async () => {
+      const root = await tempRoot();
+      roots.push(root);
+      const filePath = path.join(root, "env.json");
+      await writeJson(filePath, { SNAPPER_ACCESS_TOKEN: "access" });
+      await expect(loadConfigFile(filePath, testLogger())).resolves.toEqual({
+        SNAPPER_ACCESS_TOKEN: "access",
+      });
+    },
+  );
 
   it("throws when the file exceeds the size limit", async () => {
     const root = await tempRoot();
@@ -195,16 +196,18 @@ describe("loadConfigFile", () => {
     );
   });
 
-  it("wraps read failures after a successful stat in EnvValidationError", async () => {
-    if (process.platform === "win32" || process.getuid?.() === 0) return;
-    const root = await tempRoot();
-    roots.push(root);
-    const filePath = path.join(root, "unreadable.json");
-    await writeJson(filePath, { SNAPPER_ACCESS_TOKEN: "access" }, 0o200);
-    await chmod(filePath, 0o200);
-    await expect(loadConfigFile(filePath, testLogger())).rejects.toBeInstanceOf(
-      EnvValidationError,
-    );
-    await chmod(filePath, 0o600);
-  });
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "wraps read failures after a successful stat in EnvValidationError",
+    async () => {
+      const root = await tempRoot();
+      roots.push(root);
+      const filePath = path.join(root, "unreadable.json");
+      await writeJson(filePath, { SNAPPER_ACCESS_TOKEN: "access" }, 0o200);
+      await chmod(filePath, 0o200);
+      await expect(loadConfigFile(filePath, testLogger())).rejects.toBeInstanceOf(
+        EnvValidationError,
+      );
+      await chmod(filePath, 0o600);
+    },
+  );
 });
