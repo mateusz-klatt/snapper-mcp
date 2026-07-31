@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createLogger } from "../src/logger.js";
 import type { ProxyPending } from "../src/proxy.js";
 import { DRAIN_TIMEOUT_MS, createShutdownHandlers } from "../src/shutdown.js";
+import { waitFor } from "./helpers/wait_for.js";
 
 function silentLogger() {
   return createLogger({ prefix: "shutdown-test", level: "error", timestamps: false });
@@ -135,7 +136,9 @@ describe("createShutdownHandlers — drain semantics", () => {
     });
 
     const drainPromise = handlers.shutdown("SIGTERM");
-    await new Promise((resolve) => setTimeout(resolve, 1));
+    await waitFor(() => shuttingDown, {
+      message: "shutdown state to be set before draining pending work",
+    });
     expect(shuttingDown).toBe(true);
     expect(client.close).not.toHaveBeenCalled();
 
