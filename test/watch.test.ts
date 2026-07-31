@@ -18,6 +18,7 @@ import {
 import type { WsClient, WsClientOptions } from "../src/ws_client.js";
 import { CAN_LISTEN_ON_LOOPBACK } from "./helpers/listen_capability.js";
 import { makeMockWsServer, type ConnectionScript } from "./helpers/mock_ws_server.js";
+import { waitFor } from "./helpers/wait_for.js";
 
 describe("resolvePackageName", () => {
   it("returns the build-time global verbatim when it is a string", () => {
@@ -238,9 +239,8 @@ describe("watchMain — lifecycle integration", () => {
       signalSource,
     };
     const runPromise = watchMain(options);
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, 5);
-      if (typeof timer.unref === "function") timer.unref();
+    await waitFor(() => sessions.length > 0, {
+      message: "watch session to be created",
     });
     expect(sessions).toHaveLength(1);
     const session = sessions[0];
@@ -284,9 +284,8 @@ describe("watchMain — lifecycle integration", () => {
       install: false,
       wsClientFactory: factory,
     });
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, 5);
-      if (typeof timer.unref === "function") timer.unref();
+    await waitFor(() => sessions.length > 0, {
+      message: "watch session to be created",
     });
     expect(sessions[0]?.options.topics).toEqual([
       "signals.",
@@ -310,10 +309,14 @@ describe("watchMain — lifecycle integration", () => {
       wsClientFactory: factory,
       signalSource,
     });
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, 5);
-      if (typeof timer.unref === "function") timer.unref();
-    });
+    await waitFor(
+      () =>
+        (signalSource.handlers.get("SIGTERM")?.size ?? 0) > 0 &&
+        (signalSource.handlers.get("SIGINT")?.size ?? 0) > 0,
+      {
+        message: "watch signal handlers to be registered",
+      },
+    );
     expect(signalSource.handlers.get("SIGTERM")?.size).toBe(1);
     expect(signalSource.handlers.get("SIGINT")?.size).toBe(1);
     signalSource.fire("SIGTERM");
@@ -335,10 +338,14 @@ describe("watchMain — lifecycle integration", () => {
       wsClientFactory: factory,
       signalSource,
     });
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, 5);
-      if (typeof timer.unref === "function") timer.unref();
-    });
+    await waitFor(
+      () =>
+        (signalSource.handlers.get("SIGTERM")?.size ?? 0) > 0 &&
+        (signalSource.handlers.get("SIGINT")?.size ?? 0) > 0,
+      {
+        message: "watch signal handlers to be registered",
+      },
+    );
     signalSource.fire("SIGTERM");
     signalSource.fire("SIGINT");
     signalSource.fire("SIGTERM");
@@ -401,9 +408,8 @@ describe("watchMain — error paths", () => {
       wsClientFactory: factory,
       stdout: { write: () => undefined },
     });
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, 5);
-      if (typeof timer.unref === "function") timer.unref();
+    await waitFor(() => sessions.length > 0, {
+      message: "watch session to be created",
     });
     sessions[0]?.rejectRun(new Error("websocket exploded"));
     await expect(watchPromise).rejects.toThrow("exit(1)");
@@ -425,9 +431,8 @@ describe("watchMain — error paths", () => {
       signalSource,
       stdout: { write: () => undefined },
     });
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, 5);
-      if (typeof timer.unref === "function") timer.unref();
+    await waitFor(() => (signalSource.handlers.get("SIGTERM")?.size ?? 0) > 0, {
+      message: "watch SIGTERM handler to be registered",
     });
     expect(signalSource.handlers.get("SIGTERM")?.size).toBe(1);
     sessions[0]?.rejectRun(new Error("kapow"));
@@ -447,9 +452,8 @@ describe("watchMain — error paths", () => {
         wsClientFactory: factory,
         stdout: { write: () => undefined },
       });
-      await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, 5);
-        if (typeof timer.unref === "function") timer.unref();
+      await waitFor(() => sessions.length > 0, {
+        message: "watch session to be created",
       });
       expect(sessions[0]?.options.topics).toEqual([
         "signals.",
@@ -479,9 +483,8 @@ describe("watchMain — error paths", () => {
         wsClientFactory: factory,
         stdout: { write: () => undefined },
       });
-      await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, 5);
-        if (typeof timer.unref === "function") timer.unref();
+      await waitFor(() => sessions.length > 0, {
+        message: "watch session to be created",
       });
       expect(sessions[0]?.options.tokenStore.accessToken()).toBe("access-tok");
       sessions[0]?.resolveRun();
@@ -515,10 +518,14 @@ describe("watchMain — error paths", () => {
       signalSource,
       stdout: { write: () => undefined },
     });
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, 5);
-      if (typeof timer.unref === "function") timer.unref();
-    });
+    await waitFor(
+      () =>
+        (signalSource.handlers.get("SIGTERM")?.size ?? 0) > 0 &&
+        (signalSource.handlers.get("SIGINT")?.size ?? 0) > 0,
+      {
+        message: "watch signal handlers to be registered",
+      },
+    );
     expect(signalSource.handlers.get("SIGTERM")?.size).toBe(1);
     expect(signalSource.handlers.get("SIGINT")?.size).toBe(1);
     sessions[0]?.resolveRun();
@@ -593,9 +600,8 @@ describe("watchMain — error paths", () => {
       wsClientFactory: factory,
       stdout: { write: () => undefined },
     });
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, 5);
-      if (typeof timer.unref === "function") timer.unref();
+    await waitFor(() => sessions.length > 0, {
+      message: "watch session to be created",
     });
     sessions[0]?.rejectRun("plain string boom" as unknown as Error);
     await expect(watchPromise).rejects.toThrow("exit(1)");
@@ -654,9 +660,8 @@ describe("watchMain — config-file startup", () => {
       wsClientFactory: factory,
       stdout: { write: () => undefined },
     });
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, 5);
-      if (typeof timer.unref === "function") timer.unref();
+    await waitFor(() => sessions.length > 0, {
+      message: "watch session to be created",
     });
     expect(sessions).toHaveLength(1);
     sessions[0]?.resolveRun();
@@ -685,9 +690,8 @@ describe("watchMain — config-file startup", () => {
         wsClientFactory: factory,
         stdout: { write: () => undefined },
       });
-      await new Promise<void>((resolve) => {
-        const waiter = setTimeout(resolve, 650);
-        if (typeof waiter.unref === "function") waiter.unref();
+      await waitFor(() => sessions.length > 0, {
+        message: "watch session to be created after the config file appears",
       });
       expect(sessions).toHaveLength(1);
       sessions[0]?.resolveRun();
@@ -707,9 +711,8 @@ describe("watchMain — config-file startup", () => {
       wsClientFactory: factory,
       stdout: { write: () => undefined },
     });
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, 1_650);
-      if (typeof timer.unref === "function") timer.unref();
+    await waitFor(() => sessions.length > 0, {
+      message: "watch session to be created after config-file retries",
     });
     expect(sessions).toHaveLength(1);
     sessions[0]?.resolveRun();
@@ -777,9 +780,8 @@ describe("watchMain — fetchWsToken wiring", () => {
       wsClientFactory: factory,
       stdout: { write: () => undefined },
     });
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, 5);
-      if (typeof timer.unref === "function") timer.unref();
+    await waitFor(() => sessions.length > 0, {
+      message: "watch session to be created",
     });
     const session = sessions[0];
     expect(session).toBeDefined();
@@ -815,9 +817,8 @@ describe("watchMain — stdout sink resolution", () => {
         install: false,
         wsClientFactory: factory,
       });
-      await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, 5);
-        if (typeof timer.unref === "function") timer.unref();
+      await waitFor(() => sessions.length > 0, {
+        message: "watch session to be created",
       });
       sessions[0]?.options.onFrame({
         type: "signal",
@@ -865,9 +866,8 @@ describe("watchMain — stdout sink resolution", () => {
       wsClientFactory: factory,
       stdout: writableStream as unknown as Pick<WritableStream, "getWriter">,
     });
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, 5);
-      if (typeof timer.unref === "function") timer.unref();
+    await waitFor(() => sessions.length > 0, {
+      message: "watch session to be created",
     });
     sessions[0]?.options.onFrame({
       type: "signal",
@@ -888,9 +888,8 @@ describe("watchMain — stdout sink resolution", () => {
       operator_public_id: null,
       user_public_id: null,
     } as ServerFrame);
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, 5);
-      if (typeof timer.unref === "function") timer.unref();
+    await waitFor(() => chunks.length > 0, {
+      message: "signal frame to reach the Web Streams stdout target",
     });
     expect(chunks.join("")).toContain('"type":"signal"');
     sessions[0]?.resolveRun();
@@ -912,9 +911,8 @@ describe("watchMain — stdout sink resolution", () => {
       wsClientFactory: factory,
       stdout: writableStream as unknown as Pick<WritableStream, "getWriter">,
     });
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, 5);
-      if (typeof timer.unref === "function") timer.unref();
+    await waitFor(() => sessions.length > 0, {
+      message: "watch session to be created",
     });
     sessions[0]?.options.onFrame({
       type: "signal",
@@ -935,9 +933,8 @@ describe("watchMain — stdout sink resolution", () => {
       operator_public_id: null,
       user_public_id: null,
     } as ServerFrame);
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, 5);
-      if (typeof timer.unref === "function") timer.unref();
+    await waitFor(() => write.mock.calls.length > 0, {
+      message: "Web Streams stdout write to be recorded",
     });
     expect(write).toHaveBeenCalled();
     sessions[0]?.resolveRun();
