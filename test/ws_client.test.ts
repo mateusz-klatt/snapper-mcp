@@ -14,6 +14,7 @@ import {
   type MockWsServer,
 } from "./helpers/mock_ws_server.js";
 import { CAN_LISTEN_ON_LOOPBACK } from "./helpers/listen_capability.js";
+import { waitFor } from "./helpers/wait_for.js";
 
 const SILENT_LOGGER = createLogger({ prefix: "ws-client-test", level: "error", timestamps: false });
 const describeWithTcp = CAN_LISTEN_ON_LOOPBACK ? describe : describe.skip;
@@ -106,19 +107,6 @@ function makeOptions(
   };
 }
 
-async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
-  const start = Date.now();
-  while (!predicate()) {
-    if (Date.now() - start > timeoutMs) {
-      throw new Error(`waitFor: condition not met within ${timeoutMs}ms`);
-    }
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, 5);
-      if (typeof timer.unref === "function") timer.unref();
-    });
-  }
-}
-
 let activeServers: MockWsServer[] = [];
 
 async function startServer(scripts: readonly ConnectionScript[]): Promise<MockWsServer> {
@@ -140,10 +128,13 @@ describeWithTcp("ws_client — happy path lifecycle", () => {
     const onFrame = vi.fn<(frame: ServerFrame) => void>();
     const client = createWsClient(makeOptions(server, { onFrame }));
     const runPromise = client.run();
-    await waitFor(() => {
-      const types = server.received.map((rec) => rec.parsed.type);
-      return types.includes("subscribe");
-    });
+    await waitFor(
+      () => {
+        const types = server.received.map((rec) => rec.parsed.type);
+        return types.includes("subscribe");
+      },
+      { message: "client subscription request to reach the websocket server" },
+    );
     const subSent = server.received.find((r) => r.parsed.type === "subscribe");
     expect(subSent?.parsed.topics).toEqual(["signals."]);
     server.emit(0, {
@@ -161,8 +152,9 @@ describeWithTcp("ws_client — happy path lifecycle", () => {
       user_public_id: null,
       ...envelopeStub({ topic: "signals.kraken.BTC-USD.rsi" }),
     });
-    await waitFor(() =>
-      onFrame.mock.calls.some((c) => (c[0] as { type: string }).type === "signal"),
+    await waitFor(
+      () => onFrame.mock.calls.some((c) => (c[0] as { type: string }).type === "signal"),
+      { message: "signal frame to reach the websocket consumer" },
     );
     server.closeConnection(0, 1000, "test done");
     await client.close();
@@ -176,7 +168,9 @@ describeWithTcp("ws_client — happy path lifecycle", () => {
       makeOptions(server, { onFrame, topics: ["ai_research."] }),
     );
     const runPromise = client.run();
-    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"));
+    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"), {
+      message: "client subscription request to reach the websocket server",
+    });
     const roundPublicId = "0192f000-0000-7000-8000-dddddddddddd";
     server.emit(0, {
       type: "ai_research.request",
@@ -185,10 +179,12 @@ describeWithTcp("ws_client — happy path lifecycle", () => {
       ...envelopeStub({ topic: `ai_research.${roundPublicId}.request` }),
     });
 
-    await waitFor(() =>
-      onFrame.mock.calls.some(
-        (call) => (call[0] as { type: string }).type === "ai_research.request",
-      ),
+    await waitFor(
+      () =>
+        onFrame.mock.calls.some(
+          (call) => (call[0] as { type: string }).type === "ai_research.request",
+        ),
+      { message: "AI-research request to reach the websocket consumer" },
     );
     expect(onFrame).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -223,7 +219,9 @@ describeWithTcp("ws_client — happy path lifecycle", () => {
     });
     const client = createWsClient(makeOptions(server, { onFrame }));
     const runPromise = client.run();
-    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"));
+    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"), {
+      message: "client subscription request to reach the websocket server",
+    });
     server.emit(0, {
       type: "signal",
       instrument: "BTC-USD",
@@ -252,8 +250,9 @@ describeWithTcp("ws_client — happy path lifecycle", () => {
       user_public_id: null,
       ...envelopeStub({ topic: "orders.events.paper.BTC-USD" }),
     });
-    await waitFor(() =>
-      onFrame.mock.calls.some((c) => (c[0] as { type: string }).type === "order_event"),
+    await waitFor(
+      () => onFrame.mock.calls.some((c) => (c[0] as { type: string }).type === "order_event"),
+      { message: "order-event frame to reach the websocket consumer" },
     );
     expect(onFrame).toHaveBeenCalledTimes(2);
     server.closeConnection(0);
@@ -266,7 +265,9 @@ describeWithTcp("ws_client — happy path lifecycle", () => {
     const onFrame = vi.fn<(frame: ServerFrame) => void>();
     const client = createWsClient(makeOptions(server, { onFrame }));
     const runPromise = client.run();
-    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"));
+    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"), {
+      message: "client subscription request to reach the websocket server",
+    });
     server.emit(0, { type: "pong", active_connections: 3, ...envelopeStub() });
     server.emit(0, { type: "error", message: "boom", ...envelopeStub() });
     server.emit(0, {
@@ -282,8 +283,9 @@ describeWithTcp("ws_client — happy path lifecycle", () => {
       user_public_id: null,
       ...envelopeStub({ topic: "orders.events.paper.BTC-USD" }),
     });
-    await waitFor(() =>
-      onFrame.mock.calls.some((c) => (c[0] as { type: string }).type === "order_event"),
+    await waitFor(
+      () => onFrame.mock.calls.some((c) => (c[0] as { type: string }).type === "order_event"),
+      { message: "order-event frame to reach the websocket consumer" },
     );
     const types = onFrame.mock.calls.map((c) => (c[0] as { type: string }).type);
     expect(types).toContain("order_event");
@@ -301,7 +303,10 @@ describeWithTcp("ws_client — heartbeat", () => {
     const server = await startServer([happyPathScript()]);
     const client = createWsClient(makeOptions(server, { heartbeatIntervalMs: 30 }));
     const runPromise = client.run();
-    await waitFor(() => server.received.filter((r) => r.parsed.type === "ping").length >= 2, 2_000);
+    await waitFor(
+      () => server.received.filter((r) => r.parsed.type === "ping").length >= 2,
+      { timeoutMs: 2_000, message: "two heartbeat pings to reach the websocket server" },
+    );
     expect(server.received.filter((r) => r.parsed.type === "ping").length).toBeGreaterThanOrEqual(2);
     server.closeConnection(0);
     await client.close();
@@ -320,7 +325,10 @@ describeWithTcp("ws_client — failure paths during handshake", () => {
       }),
     );
     const runPromise = client.run();
-    await waitFor(() => server.connections.length >= 2, 2_000);
+    await waitFor(() => server.connections.length >= 2, {
+      timeoutMs: 2_000,
+      message: "client to reconnect after the auth_required timeout",
+    });
     expect(server.connections.length).toBeGreaterThanOrEqual(2);
     await client.close();
     await runPromise;
@@ -484,7 +492,9 @@ describeWithTcp("ws_client — reauth flow", () => {
     const server = await startServer([script]);
     const client = createWsClient(makeOptions(server));
     const runPromise = client.run();
-    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"));
+    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"), {
+      message: "client subscription request to reach the websocket server",
+    });
     server.closeConnection(0);
     await client.close();
     await runPromise;
@@ -530,7 +540,9 @@ describeWithTcp("ws_client — reauth flow", () => {
       .mockResolvedValueOnce({ ws_token: "ws-tok-2", ws_token_exp: "2026-04-28T14:00:00Z" });
     const client = createWsClient(makeOptions(server, { fetchWsToken }));
     const runPromise = client.run();
-    await waitFor(() => server.received.some((r) => r.parsed.type === "reauth"));
+    await waitFor(() => server.received.some((r) => r.parsed.type === "reauth"), {
+      message: "reauth frame to reach the websocket server",
+    });
     expect(fetchWsToken).toHaveBeenCalledTimes(2);
     const reauthFrame = server.received.find((r) => r.parsed.type === "reauth");
     expect(reauthFrame?.parsed.ws_token).toBe("ws-tok-2");
@@ -585,6 +597,8 @@ describeWithTcp("ws_client — reauth flow", () => {
 
   it("does not send reauth when the socket closes before a fresh token arrives", async () => {
     let resolveFresh: (value: { ws_token: string; ws_token_exp: string }) => void = () => undefined;
+    let freshTokenPromise!: Promise<{ ws_token: string; ws_token_exp: string }>;
+    let closedSessionHandledLateToken = false;
     let freshResolved = false;
     const reauthScript: ConnectionScript = {
       onConnect: (socket) => {
@@ -612,13 +626,14 @@ describeWithTcp("ws_client — reauth flow", () => {
     const fetchWsToken = vi
       .fn()
       .mockResolvedValueOnce({ ws_token: "ws-tok-1", ws_token_exp: "2026-04-28T13:00:00Z" })
-      .mockImplementationOnce(
-        () =>
-          new Promise<{ ws_token: string; ws_token_exp: string }>((resolve) => {
-            resolveFresh = resolve;
-          }),
-      )
+      .mockImplementationOnce(() => {
+        freshTokenPromise = new Promise<{ ws_token: string; ws_token_exp: string }>((resolve) => {
+          resolveFresh = resolve;
+        });
+        return freshTokenPromise;
+      })
       .mockResolvedValueOnce({ ws_token: "ws-tok-3", ws_token_exp: "2026-04-28T15:00:00Z" });
+    const sendSpy = vi.spyOn(WebSocket.prototype, "send");
     const client = createWsClient(
       makeOptions(server, {
         fetchWsToken,
@@ -628,25 +643,40 @@ describeWithTcp("ws_client — reauth flow", () => {
     );
     const runPromise = client.run();
     try {
-      await waitFor(() => fetchWsToken.mock.calls.length >= 2);
+      await waitFor(() => fetchWsToken.mock.calls.length >= 2, {
+        message: "reauth flow to request a fresh websocket token",
+      });
+      // The client's await reaction was registered first, so this observer
+      // runs only after the closed-session check consumes the late token.
+      void freshTokenPromise.then(() => {
+        closedSessionHandledLateToken = true;
+      });
       server.closeConnection(0, 1000, "closed during reauth");
       await server.awaitConnection(1, 3_000);
       freshResolved = true;
       resolveFresh({ ws_token: "late", ws_token_exp: "2026-04-28T14:00:00Z" });
-      await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, 30);
-        if (typeof timer.unref === "function") timer.unref();
-      });
+      await waitFor(
+        () =>
+          closedSessionHandledLateToken &&
+          !sendSpy.mock.calls.some(
+            (c) => typeof c[0] === "string" && c[0].includes('"type":"reauth"'),
+          ),
+        { message: "closed session to handle the late token without sending reauth" },
+      );
       expect(server.received.some((r) => r.parsed.type === "reauth")).toBe(false);
     } finally {
-      if (!freshResolved) {
-        resolveFresh({ ws_token: "late", ws_token_exp: "2026-04-28T14:00:00Z" });
+      try {
+        if (!freshResolved) {
+          resolveFresh({ ws_token: "late", ws_token_exp: "2026-04-28T14:00:00Z" });
+        }
+        if (server.connections[1] !== undefined) {
+          server.closeConnection(1);
+        }
+        await client.close();
+        await runPromise;
+      } finally {
+        sendSpy.mockRestore();
       }
-      if (server.connections[1] !== undefined) {
-        server.closeConnection(1);
-      }
-      await client.close();
-      await runPromise;
     }
   });
 
@@ -742,18 +772,30 @@ describeWithTcp("ws_client — AI-review dedup + size guards", () => {
   it("drops a duplicate AI-review by dispatch_version", async () => {
     const server = await startServer([happyPathScript()]);
     const onFrame = vi.fn<(frame: ServerFrame) => void>();
-    const client = createWsClient(makeOptions(server, { onFrame }));
-    const runPromise = client.run();
-    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"));
-    server.emit(0, reviewFrame(1, "2026-04-28T13:00:00.000Z"));
-    server.emit(0, reviewFrame(1, "2026-04-28T13:00:00.000Z"));
-    await waitFor(() =>
-      onFrame.mock.calls.some((c) => (c[0] as { type: string }).type === "ai_review.request"),
+    const debug = vi.fn();
+    const client = createWsClient(
+      makeOptions(server, { onFrame, logger: { ...SILENT_LOGGER, debug } }),
     );
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, 30);
-      if (typeof timer.unref === "function") timer.unref();
+    const runPromise = client.run();
+    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"), {
+      message: "client subscription request to reach the websocket server",
     });
+    server.emit(0, reviewFrame(1, "2026-04-28T13:00:00.000Z"));
+    server.emit(0, reviewFrame(1, "2026-04-28T13:00:00.000Z"));
+    await waitFor(
+      () =>
+        onFrame.mock.calls.some(
+          (c) => (c[0] as { type: string }).type === "ai_review.request",
+        ),
+      { message: "AI-review request to reach the websocket consumer" },
+    );
+    await waitFor(
+      () =>
+        debug.mock.calls.some(
+          (c) => typeof c[0] === "string" && c[0].includes("drop AI-review replay"),
+        ),
+      { message: "duplicate AI-review frame to be dropped" },
+    );
     const reviewDeliveries = onFrame.mock.calls.filter(
       (c) => (c[0] as { type: string }).type === "ai_review.request",
     );
@@ -768,13 +810,16 @@ describeWithTcp("ws_client — AI-review dedup + size guards", () => {
     const onFrame = vi.fn<(frame: ServerFrame) => void>();
     const client = createWsClient(makeOptions(server, { onFrame }));
     const runPromise = client.run();
-    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"));
+    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"), {
+      message: "client subscription request to reach the websocket server",
+    });
     server.emit(0, reviewFrame(1, "2026-04-28T13:00:00.000Z"));
     server.emit(0, reviewFrame(2, "2026-04-28T13:00:00.000Z"));
     await waitFor(
       () =>
         onFrame.mock.calls.filter((c) => (c[0] as { type: string }).type === "ai_review.request")
           .length === 2,
+      { message: "both AI-review dispatch versions to reach the websocket consumer" },
     );
     expect(
       onFrame.mock.calls.filter((c) => (c[0] as { type: string }).type === "ai_review.request"),
@@ -797,11 +842,14 @@ describeWithTcp("ws_client — AI-review dedup + size guards", () => {
     };
     const client = createWsClient(makeOptions(server, { onFrame }));
     const runPromise = client.run();
-    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"));
+    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"), {
+      message: "client subscription request to reach the websocket server",
+    });
     server.emit(0, reviewFrame(1, "2026-04-28T13:00:00.000Z"));
     server.emit(0, reviewFrame(1, "2026-04-28T13:00:00.000Z"));
     await waitFor(
       () => calls.filter((c) => c.type === "ai_review.request").length >= 2,
+      { message: "replayed AI-review request to reach the throwing consumer" },
     );
     expect(calls.filter((c) => c.type === "ai_review.request").length).toBeGreaterThanOrEqual(2);
     server.closeConnection(0);
@@ -812,16 +860,31 @@ describeWithTcp("ws_client — AI-review dedup + size guards", () => {
   it("drops an AI-review when signal_envelope exceeds the size budget", async () => {
     const server = await startServer([happyPathScript()]);
     const onFrame = vi.fn<(frame: ServerFrame) => void>();
-    const client = createWsClient(makeOptions(server, { onFrame, maxSignalEnvelopeBytes: 32 }));
+    const warn = vi.fn();
+    const client = createWsClient(
+      makeOptions(server, {
+        onFrame,
+        maxSignalEnvelopeBytes: 32,
+        logger: { ...SILENT_LOGGER, warn },
+      }),
+    );
     const runPromise = client.run();
-    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"));
+    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"), {
+      message: "client subscription request to reach the websocket server",
+    });
     const big = { ...reviewFrame(1, "2026-04-28T13:00:00.000Z") };
     big.signal_envelope = { huge: "x".repeat(200) };
     server.emit(0, big);
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, 60);
-      if (typeof timer.unref === "function") timer.unref();
-    });
+    await waitFor(
+      () =>
+        warn.mock.calls.some(
+          (c) =>
+            typeof c[0] === "string" &&
+            c[0].includes("dropping ai_review.request") &&
+            c[0].includes("signal_envelope"),
+        ),
+      { message: "oversized AI-review signal envelope to be dropped" },
+    );
     const aiCalls = onFrame.mock.calls.filter(
       (c) => (c[0] as { type: string }).type === "ai_review.request",
     );
@@ -834,17 +897,29 @@ describeWithTcp("ws_client — AI-review dedup + size guards", () => {
   it("drops oversized raw frames before parse", async () => {
     const server = await startServer([happyPathScript()]);
     const onFrame = vi.fn<(frame: ServerFrame) => void>();
-    const client = createWsClient(makeOptions(server, { onFrame, maxRawFrameBytes: 1024 }));
+    const warn = vi.fn();
+    const client = createWsClient(
+      makeOptions(server, {
+        onFrame,
+        maxRawFrameBytes: 1024,
+        logger: { ...SILENT_LOGGER, warn },
+      }),
+    );
     const runPromise = client.run();
-    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"));
+    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"), {
+      message: "client subscription request to reach the websocket server",
+    });
     server.emitText(
       0,
       JSON.stringify({ type: "signal", filler: "x".repeat(4096) }),
     );
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, 30);
-      if (typeof timer.unref === "function") timer.unref();
-    });
+    await waitFor(
+      () =>
+        warn.mock.calls.some(
+          (c) => typeof c[0] === "string" && c[0].includes("dropping over-sized frame"),
+        ),
+      { message: "oversized raw websocket frame to be dropped" },
+    );
     const sigs = onFrame.mock.calls.filter(
       (c) => (c[0] as { type: string }).type === "signal",
     );
@@ -857,16 +932,26 @@ describeWithTcp("ws_client — AI-review dedup + size guards", () => {
   it("drops unparseable JSON, frames without a string type, and unknown types", async () => {
     const server = await startServer([happyPathScript()]);
     const onFrame = vi.fn<(frame: ServerFrame) => void>();
-    const client = createWsClient(makeOptions(server, { onFrame }));
+    const debug = vi.fn();
+    const client = createWsClient(
+      makeOptions(server, { onFrame, logger: { ...SILENT_LOGGER, debug } }),
+    );
     const runPromise = client.run();
-    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"));
+    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"), {
+      message: "client subscription request to reach the websocket server",
+    });
     server.emitText(0, "{not valid json");
     server.emitText(0, JSON.stringify({ no_type: true }));
     server.emitText(0, JSON.stringify({ type: "totally_unknown_v999" }));
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, 30);
-      if (typeof timer.unref === "function") timer.unref();
-    });
+    await waitFor(
+      () =>
+        debug.mock.calls.some(
+          (c) =>
+            typeof c[0] === "string" &&
+            c[0].includes('dropping unknown frame.type="totally_unknown_v999"'),
+        ),
+      { message: "unknown websocket frame to be dropped" },
+    );
     expect(onFrame.mock.calls.map((c) => (c[0] as { type: string }).type)).not.toContain(
       "totally_unknown_v999",
     );
@@ -880,7 +965,9 @@ describeWithTcp("ws_client — AI-review dedup + size guards", () => {
     const onFrame = vi.fn<(frame: ServerFrame) => void>();
     const client = createWsClient(makeOptions(server, { onFrame, dedupCacheCap: 2 }));
     const runPromise = client.run();
-    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"));
+    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"), {
+      message: "client subscription request to reach the websocket server",
+    });
     function emitWith(reviewId: string, version: number): void {
       const f = reviewFrame(version, "2026-04-28T13:00:00.000Z");
       f.review_public_id = reviewId;
@@ -890,7 +977,13 @@ describeWithTcp("ws_client — AI-review dedup + size guards", () => {
     emitWith("review-b", 1);
     emitWith("review-c", 1);
     emitWith("review-a", 1);
-    await waitFor(() => onFrame.mock.calls.filter((c) => (c[0] as { type: string }).type === "ai_review.request").length >= 4);
+    await waitFor(
+      () =>
+        onFrame.mock.calls.filter(
+          (c) => (c[0] as { type: string }).type === "ai_review.request",
+        ).length >= 4,
+      { message: "four AI-review requests to reach the websocket consumer" },
+    );
     expect(
       onFrame.mock.calls.filter((c) => (c[0] as { type: string }).type === "ai_review.request").length,
     ).toBeGreaterThanOrEqual(4);
@@ -904,11 +997,14 @@ describeWithTcp("ws_client — AI-review dedup + size guards", () => {
     const onFrame = vi.fn<(frame: ServerFrame) => void>();
     const client = createWsClient(makeOptions(server, { onFrame }));
     const runPromise = client.run();
-    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"));
+    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"), {
+      message: "client subscription request to reach the websocket server",
+    });
     const bad = reviewFrame(1, "not-a-date");
     server.emit(0, bad);
     await waitFor(
       () => onFrame.mock.calls.some((c) => (c[0] as { type: string }).type === "ai_review.request"),
+      { message: "AI-review request with an invalid deadline to reach the consumer" },
     );
     expect(
       onFrame.mock.calls.some((c) => (c[0] as { type: string }).type === "ai_review.request"),
@@ -923,12 +1019,15 @@ describeWithTcp("ws_client — AI-review dedup + size guards", () => {
     const onFrame = vi.fn<(frame: ServerFrame) => void>();
     const client = createWsClient(makeOptions(server, { onFrame, maxSignalEnvelopeBytes: 4 }));
     const runPromise = client.run();
-    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"));
+    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"), {
+      message: "client subscription request to reach the websocket server",
+    });
     const frame = reviewFrame(1, "2026-04-28T13:00:00.000Z");
     delete frame.signal_envelope;
     server.emit(0, frame);
     await waitFor(
       () => onFrame.mock.calls.some((c) => (c[0] as { type: string }).type === "ai_review.request"),
+      { message: "AI-review request without a signal envelope to reach the consumer" },
     );
     expect(onFrame).toHaveBeenCalled();
     server.closeConnection(0);
@@ -939,9 +1038,14 @@ describeWithTcp("ws_client — AI-review dedup + size guards", () => {
   it("dedups ai_review.decision_ack and ai_review.caps_violation by dispatch_version", async () => {
     const server = await startServer([happyPathScript()]);
     const onFrame = vi.fn<(frame: ServerFrame) => void>();
-    const client = createWsClient(makeOptions(server, { onFrame }));
+    const debug = vi.fn();
+    const client = createWsClient(
+      makeOptions(server, { onFrame, logger: { ...SILENT_LOGGER, debug } }),
+    );
     const runPromise = client.run();
-    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"));
+    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"), {
+      message: "client subscription request to reach the websocket server",
+    });
     const ack = {
       type: "ai_review.decision_ack",
       review_public_id: "0192f000-0000-7000-8000-dddddddddddd",
@@ -982,11 +1086,22 @@ describeWithTcp("ws_client — AI-review dedup + size guards", () => {
         onFrame.mock.calls.some(
           (c) => (c[0] as { type: string }).type === "ai_review.caps_violation",
         ),
+      { message: "both AI-review acknowledgement types to reach the consumer" },
     );
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, 30);
-      if (typeof timer.unref === "function") timer.unref();
-    });
+    await waitFor(
+      () =>
+        debug.mock.calls.some(
+          (c) =>
+            typeof c[0] === "string" &&
+            c[0].includes("key=ai_review.decision_ack:"),
+        ) &&
+        debug.mock.calls.some(
+          (c) =>
+            typeof c[0] === "string" &&
+            c[0].includes("key=ai_review.caps_violation:"),
+        ),
+      { message: "duplicate AI-review acknowledgements to be dropped" },
+    );
     const ackCalls = onFrame.mock.calls.filter(
       (c) => (c[0] as { type: string }).type === "ai_review.decision_ack",
     );
@@ -1013,7 +1128,9 @@ describeWithTcp("ws_client — periodic dedup pruning", () => {
     );
     const runPromise = client.run();
     try {
-      await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"));
+      await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"), {
+        message: "client subscription request to reach the websocket server",
+      });
       const past = new Date(Date.now() - 10_000).toISOString();
       const stale = {
         type: "ai_review.request",
@@ -1035,6 +1152,7 @@ describeWithTcp("ws_client — periodic dedup pruning", () => {
           onFrame.mock.calls.filter(
             (c) => (c[0] as { type: string }).type === "ai_review.request",
           ).length === 1,
+        { message: "expired AI-review request to reach the consumer initially" },
       );
       await new Promise<void>((resolve) => {
         const timer = setTimeout(resolve, 80);
@@ -1046,7 +1164,10 @@ describeWithTcp("ws_client — periodic dedup pruning", () => {
           onFrame.mock.calls.filter(
             (c) => (c[0] as { type: string }).type === "ai_review.request",
           ).length === 2,
-        2_000,
+        {
+          timeoutMs: 2_000,
+          message: "expired AI-review request to be redelivered after pruning",
+        },
       );
       expect(
         onFrame.mock.calls.filter((c) => (c[0] as { type: string }).type === "ai_review.request"),
@@ -1061,15 +1182,19 @@ describeWithTcp("ws_client — periodic dedup pruning", () => {
   it("keeps a future-deadline AI-review through a prune pass", async () => {
     const server = await startServer([happyPathScript()]);
     const onFrame = vi.fn<(frame: ServerFrame) => void>();
+    const debug = vi.fn();
     const client = createWsClient(
       makeOptions(server, {
         onFrame,
         dedupPruneIntervalMs: 30,
+        logger: { ...SILENT_LOGGER, debug },
       }),
     );
     const runPromise = client.run();
     try {
-      await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"));
+      await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"), {
+        message: "client subscription request to reach the websocket server",
+      });
       const future = new Date(Date.now() + 60_000).toISOString();
       const frame = {
         type: "ai_review.request",
@@ -1091,16 +1216,22 @@ describeWithTcp("ws_client — periodic dedup pruning", () => {
           onFrame.mock.calls.filter(
             (c) => (c[0] as { type: string }).type === "ai_review.request",
           ).length === 1,
+        { message: "future AI-review request to reach the consumer initially" },
       );
       await new Promise<void>((resolve) => {
         const timer = setTimeout(resolve, 80);
         if (typeof timer.unref === "function") timer.unref();
       });
       server.emit(0, frame);
-      await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, 30);
-        if (typeof timer.unref === "function") timer.unref();
-      });
+      await waitFor(
+        () =>
+          debug.mock.calls.some(
+            (c) =>
+              typeof c[0] === "string" &&
+              c[0].includes("key=ai_review.request:"),
+          ),
+        { message: "future-deadline AI-review replay to be dropped" },
+      );
       expect(
         onFrame.mock.calls.filter((c) => (c[0] as { type: string }).type === "ai_review.request"),
       ).toHaveLength(1);
@@ -1127,7 +1258,9 @@ describeWithTcp("ws_client — close()", () => {
     const firstRun = client.run();
     const secondRun = client.run();
     expect(secondRun).toBe(firstRun);
-    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"));
+    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"), {
+      message: "client subscription request to reach the websocket server",
+    });
     await client.close();
     await firstRun;
   });
@@ -1149,7 +1282,9 @@ describeWithTcp("ws_client — close()", () => {
       }),
     );
     const runPromise = client.run();
-    await waitFor(() => fetchWsToken.mock.calls.length === 1);
+    await waitFor(() => fetchWsToken.mock.calls.length === 1, {
+      message: "initial websocket token request to start",
+    });
     const closePromise = client.close();
     resolveToken({ ws_token: "late", ws_token_exp: "2026-04-28T13:00:00.000Z" });
     await closePromise;
@@ -1161,7 +1296,9 @@ describeWithTcp("ws_client — close()", () => {
     const server = await startServer([happyPathScript()]);
     const client = createWsClient(makeOptions(server));
     const runPromise = client.run();
-    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"));
+    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"), {
+      message: "client subscription request to reach the websocket server",
+    });
     const firstClose = client.close();
     const secondClose = client.close();
     let firstDoneAt: number | null = null;
@@ -1195,20 +1332,25 @@ describeWithTcp("ws_client — close()", () => {
       },
     };
     const server = await startServer([failScript]);
+    const info = vi.fn();
     const client = createWsClient(
       makeOptions(server, {
         reconnectBackoffBaseMs: 5_000,
         reconnectBackoffMaxMs: 5_000,
         reconnectJitterFraction: 0,
+        logger: { ...SILENT_LOGGER, info },
       }),
     );
     const runPromise = client.run();
     await server.awaitConnection(0, 3_000);
     server.closeConnection(0);
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, 50);
-      if (typeof timer.unref === "function") timer.unref();
-    });
+    await waitFor(
+      () =>
+        info.mock.calls.some(
+          (c) => c[0] === "watch: reconnecting in 5000ms (attempt 1)",
+        ),
+      { message: "client to enter the 5000ms reconnect backoff" },
+    );
     const beforeClose = Date.now();
     await client.close();
     await runPromise;
@@ -1220,7 +1362,9 @@ describeWithTcp("ws_client — close()", () => {
     const server = await startServer([happyPathScript()]);
     const client = createWsClient(makeOptions(server));
     const runPromise = client.run();
-    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"));
+    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"), {
+      message: "client subscription request to reach the websocket server",
+    });
     expect(server.connections).toHaveLength(1);
     await client.close();
     await client.close();
@@ -1244,7 +1388,9 @@ describeWithTcp("ws_client — runs with all defaults applied", () => {
       logger: SILENT_LOGGER,
     });
     const runPromise = client.run();
-    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"));
+    await waitFor(() => server.received.some((r) => r.parsed.type === "subscribe"), {
+      message: "client subscription request to reach the websocket server",
+    });
     expect(server.received.some((r) => r.parsed.type === "subscribe")).toBe(true);
     server.closeConnection(0);
     await client.close();
@@ -1319,18 +1465,26 @@ describeWithTcp("ws_client — close-before-open via injected socket", () => {
       return fake;
     };
     const factorySpy = vi.fn(fakeFactory);
+    const warn = vi.fn();
     const client = createWsClient(
       makeOptions(server, {
         socketFactory: factorySpy as unknown as WsClientOptions["socketFactory"],
+        logger: { ...SILENT_LOGGER, warn },
         reconnectBackoffBaseMs: 1,
         reconnectBackoffMaxMs: 5,
       }),
     );
     const runPromise = client.run();
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, 80);
-      if (typeof timer.unref === "function") timer.unref();
-    });
+    await waitFor(
+      () =>
+        warn.mock.calls.some(
+          (c) =>
+            typeof c[0] === "string" &&
+            c[0].includes("websocket closed before open") &&
+            c[0].includes("reason=preempt"),
+        ),
+      { message: "pre-open socket close to reject waitForOpen" },
+    );
     expect(factorySpy.mock.calls.length).toBeGreaterThanOrEqual(1);
     await client.close();
     await runPromise;
@@ -1374,7 +1528,10 @@ describeWithTcp("ws_client — close-before-open via injected socket", () => {
         logger.warn.mock.calls.some(
           (c) => typeof c[0] === "string" && c[0].includes("(no reason)"),
         ),
-      2_000,
+      {
+        timeoutMs: 2_000,
+        message: "pre-open socket close without a reason to be logged",
+      },
     );
     await client.close();
     await runPromise;
@@ -1488,15 +1645,21 @@ describeWithTcp("ws_client — counter envelope minting", () => {
       }),
     );
     const runPromise = client.run();
-    await waitFor(() => {
-      const types = server.received.map((r) => r.parsed.type);
-      return (
-        types.includes("authenticate") &&
-        types.includes("subscribe") &&
-        types.includes("reauth") &&
-        types.filter((t) => t === "ping").length >= 1
-      );
-    }, 3_000);
+    await waitFor(
+      () => {
+        const types = server.received.map((r) => r.parsed.type);
+        return (
+          types.includes("authenticate") &&
+          types.includes("subscribe") &&
+          types.includes("reauth") &&
+          types.filter((t) => t === "ping").length >= 1
+        );
+      },
+      {
+        timeoutMs: 3_000,
+        message: "authenticate, subscribe, reauth, and ping frames to reach the server",
+      },
+    );
     const auth = server.received.find((r) => r.parsed.type === "authenticate");
     const sub = server.received.find((r) => r.parsed.type === "subscribe");
     const reauth = server.received.find((r) => r.parsed.type === "reauth");

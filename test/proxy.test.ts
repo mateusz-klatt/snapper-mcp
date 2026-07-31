@@ -18,6 +18,7 @@ import type { z } from "zod";
 
 import { createLogger } from "../src/logger.js";
 import { supportedMirroredCapabilities, wireProxy, type ProxyPending } from "../src/proxy.js";
+import { waitFor } from "./helpers/wait_for.js";
 
 type HandlerFn = (request: unknown, extra: unknown) => Promise<unknown> | unknown;
 type NotificationHandlerFn = (notification: unknown) => void | Promise<void>;
@@ -170,7 +171,9 @@ describe("wireProxy — forward path", () => {
         }),
     );
     const inflight = handler({ method: "tools/list" }, {});
-    await new Promise((resolve) => setTimeout(resolve, 1));
+    await waitFor(() => harness.pending.pendingForward.size === 1, {
+      message: "forward request to enter the pending set",
+    });
     expect(harness.pending.pendingForward.size).toBe(1);
     resolveRequest({ result: "ok" });
     await inflight;
@@ -217,7 +220,9 @@ describe("wireProxy — reverse path (fallbackNotificationHandler)", () => {
       method: "notifications/progress",
       params: {},
     });
-    await new Promise((resolve) => setTimeout(resolve, 1));
+    await waitFor(() => pending.pendingReverse.size === 1, {
+      message: "reverse notification send to enter the pending set",
+    });
     expect(pending.pendingReverse.size).toBe(1);
     resolveSend();
     await forwarded;
