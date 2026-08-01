@@ -25,16 +25,19 @@
  *   1. Parse argv → `parseWatchArgs`.
  *   2. Resolve credentials from CLI flags, an optional config file,
  *      then environment variables.
- *   3. Construct `TokenStore` + bind a `fetchWsToken` closure that
- *      reads the access bearer from the store. `fetchWsToken` calls
- *      `POST /api/auth/ws_token` to mint a one-shot WebSocket token
- *      from the access bearer's session.
+ *   3. Construct `TokenStore`, fetch the delegate's own identity once
+ *      from `GET /api/auth/me`, and bind a `fetchWsToken` closure that
+ *      reads the same access bearer from the store. `fetchWsToken`
+ *      calls `POST /api/auth/ws_token` to mint a one-shot WebSocket
+ *      token from the access bearer's session.
  *   4. Construct `EnvelopeMinter` (one per process — a stable
  *      session_id across the whole watch run lets server-side gap
  *      detection observe a clean per-client provenance).
- *   5. Construct the `WsClient` with `onFrame = (frame) =>
- *      stdout.write(JSON.stringify(frame) + "\n")`. Stderr is the
- *      logger channel; stdout is reserved for the JSONL stream.
+ *   5. Construct the `WsClient` with a cheap `onFrame` address filter.
+ *      Own AI-review requests pass immediately; foreign requests are
+ *      held until the backend's fanout boundary and cancelled if a
+ *      matching decision acknowledgement arrives first. Stderr is the
+ *      diagnostic channel; stdout is reserved for the JSONL stream.
  *   6. Install one-shot SIGTERM/SIGINT handlers that call
  *      `client.close()` once and resolve the run promise.
  *   7. Await `client.run()` until either the runner exits with an
@@ -75,6 +78,7 @@ import { EnvelopeMinter } from "./envelope.js";
 import { EnvValidationError } from "./errors.js";
 import { createLogger, writeStderr, type Logger } from "./logger.js";
 import { TokenStore } from "./token_store.js";
+import type { AiReviewRequestFrame, ServerFrame } from "./types.js";
 import { fetchWsToken, type WsTokenResult } from "./ws_token.js";
 import {
   createWsClient,
@@ -106,6 +110,9 @@ const DEFAULT_TOPICS: readonly string[] = [
   "ai_reviews.",
   "ai_research.",
 ];
+
+const AUTH_ME_TIMEOUT_MS = 10_000;
+const AI_REVIEW_FANOUT_AFTER_MS = 30_000;
 
 export class WatchArgsError extends Error {
   constructor(message: string) {
@@ -215,17 +222,169 @@ export function resolveSignalSource(opt: SignalSource | undefined): SignalSource
 interface WatchSetup {
   readonly client: WsClient;
   readonly logger: Logger;
+  readonly dispose: () => void;
 }
 
-function buildWatchSetup(
+interface DelegateIdentityEnvelope {
+  readonly payload?: {
+    readonly delegate_public_id?: unknown;
+  };
+}
+
+interface FrameForwarder {
+  readonly onFrame: (frame: ServerFrame) => void;
+  readonly dispose: () => void;
+}
+
+async function fetchDelegatePublicId(baseUrl: URL, store: TokenStore): Promise<string> {
+  const url = new URL("/api/auth/me", baseUrl.origin);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), AUTH_ME_TIMEOUT_MS);
+  let response: Response;
+  try {
+    response = await globalThis.fetch(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${store.accessToken()}`,
+      },
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error("GET /api/auth/me timed out after 10s", { cause: err });
+    }
+    throw new Error("GET /api/auth/me failed", { cause: err });
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (!response.ok) {
+    throw new Error(`GET /api/auth/me returned HTTP ${response.status}`);
+  }
+
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    throw new Error("GET /api/auth/me returned malformed JSON");
+  }
+  if (body === null || typeof body !== "object") {
+    throw new Error("GET /api/auth/me response is not a JSON object");
+  }
+  const delegatePublicId = (body as DelegateIdentityEnvelope).payload?.delegate_public_id;
+  if (typeof delegatePublicId !== "string" || delegatePublicId.trim().length === 0) {
+    throw new Error("GET /api/auth/me returned no delegate_public_id");
+  }
+  return delegatePublicId.trim();
+}
+
+function writeFrame(sink: JsonlSink, frame: ServerFrame): void {
+  sink.write(`${JSON.stringify(frame)}\n`);
+}
+
+function createFrameForwarder(
+  sink: JsonlSink,
+  delegatePublicId: string | null,
+): FrameForwarder {
+  if (delegatePublicId === null) {
+    return {
+      onFrame: (frame) => writeFrame(sink, frame),
+      dispose: () => undefined,
+    };
+  }
+
+  const held = new Map<string, ReturnType<typeof setTimeout>>();
+  const cancelHeld = (reviewPublicId: string): void => {
+    const timer = held.get(reviewPublicId);
+    if (timer === undefined) return;
+    clearTimeout(timer);
+    held.delete(reviewPublicId);
+  };
+
+  const holdForeignRequest = (frame: AiReviewRequestFrame): void => {
+    const createdAtMs = Date.parse(frame.timestamp);
+    const deadlineMs = Date.parse(frame.deadline);
+    if (!Number.isFinite(createdAtMs) || !Number.isFinite(deadlineMs)) {
+      writeFrame(sink, frame);
+      return;
+    }
+
+    const releaseAtMs = createdAtMs + AI_REVIEW_FANOUT_AFTER_MS;
+    const nowMs = Date.now();
+    if (deadlineMs <= nowMs || deadlineMs <= releaseAtMs) {
+      return;
+    }
+    if (releaseAtMs <= nowMs) {
+      writeFrame(sink, frame);
+      return;
+    }
+
+    cancelHeld(frame.review_public_id);
+    const timer = setTimeout(() => {
+      held.delete(frame.review_public_id);
+      if (Date.now() < deadlineMs) {
+        writeFrame(sink, frame);
+      }
+    }, releaseAtMs - nowMs);
+    timer.unref();
+    held.set(frame.review_public_id, timer);
+  };
+
+  return {
+    onFrame: (frame) => {
+      if (frame.type === "ai_review.decision_ack") {
+        cancelHeld(frame.review_public_id);
+        writeFrame(sink, frame);
+        return;
+      }
+      if (frame.type !== "ai_review.request") {
+        writeFrame(sink, frame);
+        return;
+      }
+
+      const selected = (frame as { readonly selected_delegate_public_id?: unknown })
+        .selected_delegate_public_id;
+      if (
+        typeof selected !== "string" ||
+        selected.length === 0 ||
+        selected === delegatePublicId
+      ) {
+        writeFrame(sink, frame);
+        return;
+      }
+      holdForeignRequest(frame);
+    },
+    dispose: () => {
+      for (const timer of held.values()) clearTimeout(timer);
+      held.clear();
+    },
+  };
+}
+
+async function buildWatchSetup(
   args: WatchArgs,
   options: WatchOptions,
   sink: JsonlSink,
   env: BridgeEnv,
   logger: Logger,
-): WatchSetup {
+): Promise<WatchSetup> {
   const wsUrl = computeWsUrl(env.baseUrl);
   const store = new TokenStore({ access: env.accessToken });
+  let delegatePublicId: string | null = null;
+  let filterStatus: string;
+  try {
+    delegatePublicId = await fetchDelegatePublicId(env.baseUrl, store);
+    filterStatus =
+      `INFO ai_review delegate filter enabled: ` +
+      `delegate_public_id=${JSON.stringify(delegatePublicId)}`;
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    filterStatus =
+      `WARN ai_review delegate filter disabled: ${reason}; forwarding all frames`;
+  }
+  writeStderr(`[${CLIENT_NAME} watch] ${filterStatus}\n`);
+
+  const forwarder = createFrameForwarder(sink, delegatePublicId);
   const minter = new EnvelopeMinter();
   const fetchToken = (): Promise<WsTokenResult> => fetchWsToken(env.baseUrl, store, logger);
   const wsOptions: WsClientOptions = {
@@ -235,11 +394,11 @@ function buildWatchSetup(
     topics: args.topics,
     minter,
     logger,
-    onFrame: (frame) => sink.write(`${JSON.stringify(frame)}\n`),
+    onFrame: forwarder.onFrame,
   };
   const factory = options.wsClientFactory ?? createWsClient;
   const client = factory(wsOptions);
-  return { client, logger };
+  return { client, logger, dispose: forwarder.dispose };
 }
 
 export async function watchMain(options: WatchOptions = {}): Promise<void> {
@@ -262,20 +421,25 @@ export async function watchMain(options: WatchOptions = {}): Promise<void> {
     const configFile: ConfigFile | null =
       args.flags.configPath === null ? null : await loadConfigFile(args.flags.configPath, logger);
     const env = resolveBridgeEnv(source, args.flags, configFile, logger);
-    setup = buildWatchSetup(args, options, sink, env, logger);
+    setup = await buildWatchSetup(args, options, sink, env, logger);
   } catch (err) {
     if (!(err instanceof EnvValidationError)) throw err;
     writeStderr(`[${CLIENT_NAME} watch] ${err.message}\n`);
     process.exit(1);
     return;
   }
-  const { client } = setup;
+  const { client, dispose } = setup;
 
   const signalSource = resolveSignalSource(options.signalSource);
   const shouldInstall = options.install ?? true;
 
   logger.info(`subscribing to topics: ${args.topics.join(", ")}`);
-  const exitCode = await runWatchSession(client, logger, signalSource, shouldInstall);
+  let exitCode: number | null;
+  try {
+    exitCode = await runWatchSession(client, logger, signalSource, shouldInstall);
+  } finally {
+    dispose();
+  }
   if (exitCode !== null) {
     process.exit(exitCode);
   }
