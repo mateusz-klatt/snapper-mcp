@@ -148,8 +148,7 @@ export function parseWatchArgs(argv: readonly string[]): WatchArgs {
   const { flags, remaining } = parseCliFlags(argv);
   const topics: string[] = [];
   for (let i = 0; i < remaining.length; i += 1) {
-    const arg = remaining[i];
-    if (arg === undefined) continue;
+    const arg = remaining[i]!;
     if (arg === "--topic") {
       const next = remaining[i + 1];
       if (typeof next !== "string" || next.length === 0) {
@@ -198,10 +197,7 @@ function resolveStdout(opt: WatchOptions["stdout"]): JsonlSink {
        * of the lifecycle (reconnect, heartbeat, shutdown) intact.
        */
       pendingWrite = pendingWrite
-        .then(
-          () => writer.write(encoder.encode(line)),
-          () => writer.write(encoder.encode(line)),
-        )
+        .then(() => writer.write(encoder.encode(line)))
         .catch((): void => undefined);
     },
   };

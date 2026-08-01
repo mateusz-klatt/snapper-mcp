@@ -534,6 +534,110 @@ describe("watchMain — AI-review delegate filtering", () => {
     }
   });
 
+  it.each([
+    ["timestamp", { timestamp: "not-a-timestamp" }],
+    ["deadline", { deadline: "not-a-deadline" }],
+  ])("fails open when a foreign request has an invalid %s", async (_field, overrides) => {
+    const watch = await startCapturedWatch();
+    const request = makeAiReviewRequest({
+      selected_delegate_public_id: FOREIGN_DELEGATE_PUBLIC_ID,
+      ...overrides,
+    });
+
+    watch.session.options.onFrame(request);
+
+    expect(watch.lines).toHaveLength(1);
+    expect(JSON.parse(watch.lines[0] ?? "")).toEqual(request);
+    await watch.finish();
+  });
+
+  it.each([
+    ["the deadline has elapsed", "2026-08-01T12:00:10.000Z"],
+    ["the deadline precedes fanout", "2026-08-01T12:00:20.000Z"],
+  ])("discards a foreign request when %s", async (_reason, deadline) => {
+    const watch = await startCapturedWatch();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-01T12:00:10.000Z"));
+    try {
+      const request = makeAiReviewRequest({
+        selected_delegate_public_id: FOREIGN_DELEGATE_PUBLIC_ID,
+        deadline,
+      });
+
+      watch.session.options.onFrame(request);
+
+      expect(watch.lines).toHaveLength(0);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      await watch.finish();
+      vi.useRealTimers();
+    }
+  });
+
+  it("passes a foreign request immediately when fanout eligibility already elapsed", async () => {
+    const watch = await startCapturedWatch();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-01T12:00:30.000Z"));
+    try {
+      const request = makeAiReviewRequest({
+        selected_delegate_public_id: FOREIGN_DELEGATE_PUBLIC_ID,
+      });
+
+      watch.session.options.onFrame(request);
+
+      expect(watch.lines).toHaveLength(1);
+      expect(JSON.parse(watch.lines[0] ?? "")).toEqual(request);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      await watch.finish();
+      vi.useRealTimers();
+    }
+  });
+
+  it("discards a held request when its timer runs after the deadline", async () => {
+    const watch = await startCapturedWatch();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-01T12:00:10.000Z"));
+    try {
+      const request = makeAiReviewRequest({
+        selected_delegate_public_id: FOREIGN_DELEGATE_PUBLIC_ID,
+      });
+      watch.session.options.onFrame(request);
+      expect(vi.getTimerCount()).toBe(1);
+
+      vi.setSystemTime(new Date("2026-08-01T12:01:01.000Z"));
+      await vi.runOnlyPendingTimersAsync();
+
+      expect(watch.lines).toHaveLength(0);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      await watch.finish();
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels a held request timer when the watch session shuts down", async () => {
+    const watch = await startCapturedWatch();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-01T12:00:10.000Z"));
+    try {
+      watch.session.options.onFrame(
+        makeAiReviewRequest({
+          selected_delegate_public_id: FOREIGN_DELEGATE_PUBLIC_ID,
+        }),
+      );
+      expect(vi.getTimerCount()).toBe(1);
+
+      await watch.finish();
+
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(watch.lines).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("passes a request with no selected_delegate_public_id", async () => {
     const watch = await startCapturedWatch();
     const legacyRequest = { ...makeAiReviewRequest() } as Record<string, unknown>;
@@ -565,6 +669,136 @@ describe("watchMain — AI-review delegate filtering", () => {
         "WARN ai_review delegate filter disabled: GET /api/auth/me returned HTTP 503; forwarding all frames",
       ),
     ]);
+    stderrCapture.restore();
+    await watch.finish();
+  });
+
+  it("aborts a stalled GET /auth/me and fails open after the startup timeout", async () => {
+    vi.useFakeTimers();
+    let requestSignal: AbortSignal | null = null;
+    const fetchMock = vi.fn(
+      (_input: RequestInfo | URL, init?: RequestInit): Promise<Response> =>
+        new Promise<Response>((_resolve, reject) => {
+          requestSignal = init?.signal instanceof AbortSignal ? init.signal : null;
+          requestSignal?.addEventListener(
+            "abort",
+            () => {
+              const abortError = new Error("aborted");
+              abortError.name = "AbortError";
+              reject(abortError);
+            },
+            { once: true },
+          );
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const stderrCapture = captureStderr();
+    const { factory, sessions } = createCapturingFactory();
+    const { sink, lines } = makeSink();
+    const runPromise = watchMain({
+      source: baseEnv(),
+      argv: [],
+      stdout: sink,
+      install: false,
+      wsClientFactory: factory,
+    });
+
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(requestSignal?.aborted).toBe(true);
+    expect(sessions).toHaveLength(1);
+    const foreignRequest = makeAiReviewRequest({
+      selected_delegate_public_id: FOREIGN_DELEGATE_PUBLIC_ID,
+    });
+    sessions[0]?.options.onFrame(foreignRequest);
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0] ?? "")).toEqual(foreignRequest);
+    expect(stderrCapture.text().trim().split("\n")).toEqual([
+      expect.stringContaining(
+        "WARN ai_review delegate filter disabled: GET /api/auth/me timed out after 10s; forwarding all frames",
+      ),
+    ]);
+
+    sessions[0]?.resolveRun();
+    await runPromise;
+    stderrCapture.restore();
+    vi.useRealTimers();
+  });
+
+  it("fails open when GET /auth/me rejects with a network error", async () => {
+    const fetchMock = vi.fn(() => Promise.reject(new TypeError("network offline")));
+    vi.stubGlobal("fetch", fetchMock);
+    const stderrCapture = captureStderr();
+    const watch = await startCapturedWatch();
+    const foreignRequest = makeAiReviewRequest({
+      selected_delegate_public_id: FOREIGN_DELEGATE_PUBLIC_ID,
+    });
+
+    watch.session.options.onFrame(foreignRequest);
+
+    expect(watch.lines).toHaveLength(1);
+    expect(JSON.parse(watch.lines[0] ?? "")).toEqual(foreignRequest);
+    expect(stderrCapture.text()).toContain(
+      "WARN ai_review delegate filter disabled: GET /api/auth/me failed; forwarding all frames",
+    );
+    stderrCapture.restore();
+    await watch.finish();
+  });
+
+  it("fails open when GET /auth/me returns malformed JSON", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response("{", {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+    const stderrCapture = captureStderr();
+    const watch = await startCapturedWatch();
+    const foreignRequest = makeAiReviewRequest({
+      selected_delegate_public_id: FOREIGN_DELEGATE_PUBLIC_ID,
+    });
+
+    watch.session.options.onFrame(foreignRequest);
+
+    expect(watch.lines).toHaveLength(1);
+    expect(JSON.parse(watch.lines[0] ?? "")).toEqual(foreignRequest);
+    expect(stderrCapture.text()).toContain(
+      "WARN ai_review delegate filter disabled: GET /api/auth/me returned malformed JSON; forwarding all frames",
+    );
+    stderrCapture.restore();
+    await watch.finish();
+  });
+
+  it.each([
+    ["null", null],
+    ["a scalar", "not-an-envelope"],
+  ])("fails open when GET /auth/me returns %s JSON", async (_label, body) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify(body), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+      ),
+    );
+    const stderrCapture = captureStderr();
+    const watch = await startCapturedWatch();
+    const foreignRequest = makeAiReviewRequest({
+      selected_delegate_public_id: FOREIGN_DELEGATE_PUBLIC_ID,
+    });
+
+    watch.session.options.onFrame(foreignRequest);
+
+    expect(watch.lines).toHaveLength(1);
+    expect(JSON.parse(watch.lines[0] ?? "")).toEqual(foreignRequest);
+    expect(stderrCapture.text()).toContain(
+      "WARN ai_review delegate filter disabled: GET /api/auth/me response is not a JSON object; forwarding all frames",
+    );
     stderrCapture.restore();
     await watch.finish();
   });
@@ -1166,7 +1400,7 @@ describe("watchMain — stdout sink resolution", () => {
     await runPromise;
   });
 
-  it("swallows rejected writes from a Web Streams stdout target", async () => {
+  it("keeps attempting Web Streams writes after a rejected write", async () => {
     const write = vi.fn().mockRejectedValue(new Error("closed"));
     const writableStream = {
       getWriter: () => ({
@@ -1184,7 +1418,7 @@ describe("watchMain — stdout sink resolution", () => {
     await waitFor(() => sessions.length > 0, {
       message: "watch session to be created",
     });
-    sessions[0]?.options.onFrame({
+    const signalFrame = {
       type: "signal",
       session_id: "0192f000-0000-7000-8000-000000000001",
       sequence_id: 1,
@@ -1202,11 +1436,13 @@ describe("watchMain — stdout sink resolution", () => {
       wallet_public_id: "0192f000-0000-7000-8000-bbbbbbbbbbbb",
       operator_public_id: null,
       user_public_id: null,
-    } as ServerFrame);
-    await waitFor(() => write.mock.calls.length > 0, {
-      message: "Web Streams stdout write to be recorded",
+    } as ServerFrame;
+    sessions[0]?.options.onFrame(signalFrame);
+    sessions[0]?.options.onFrame(signalFrame);
+    await waitFor(() => write.mock.calls.length === 2, {
+      message: "both Web Streams stdout write attempts to be recorded",
     });
-    expect(write).toHaveBeenCalled();
+    expect(write).toHaveBeenCalledTimes(2);
     sessions[0]?.resolveRun();
     await runPromise;
   });
