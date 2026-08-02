@@ -3,10 +3,6 @@ name: publish
 on:
   workflow_dispatch:
 
-permissions:
-  contents: write
-  id-token: write
-
 concurrency:
   group: publish
   cancel-in-progress: false
@@ -16,26 +12,31 @@ jobs:
     name: Guarded npm publish
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: write
+      id-token: write
     steps:
       - name: Enforce master-branch only
+        env:
+          PUBLISH_REF: ${{ github.ref }}
         run: |
-          if [ "${{ github.ref }}" != "refs/heads/master" ]; then
-            echo "Publish only allowed from master. Refusing to publish from ${{ github.ref }}."
+          if [ "$PUBLISH_REF" != "refs/heads/master" ]; then
+            echo "Publish only allowed from master. Refusing to publish from $PUBLISH_REF."
             exit 1
           fi
 
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup Node 26
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: "26"
           registry-url: "https://registry.npmjs.org"
           cache: npm
 
       - name: Install dependencies (npm ci)
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Lint
         run: npm run lint
