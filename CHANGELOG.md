@@ -7,10 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-08-02
+
+### New: foreign review requests are held, not woken (#172)
+
+The `watch` monitor now fetches its own `delegate_public_id` from
+`GET /api/auth/me` at startup and classifies incoming `ai_review.request`
+frames. Requests addressed to another delegate are **held** instead of waking
+the agent immediately: the frame is released to the JSONL consumer only when
+the fanout window opens (`frame.timestamp + 30 s`), and a `decision_ack`
+arriving earlier cancels the held frame entirely. The selected delegate keeps
+waking instantly. Identity resolution fails open — if `/api/auth/me` is
+unavailable, every request wakes the agent as before.
+
 ### Added
 
 - The `watch` monitor subscribes to `ai_research.` by default and forwards
-  `ai_research.request` frames to its JSONL consumer.
+  `ai_research.request` frames to its JSONL consumer (#146).
+
+### Changed
+
+- Wire contract regenerated for the auth D4a `ai_reviewer` role (#148) and the
+  researcher role (#145).
+- Dependencies refreshed to latest across the board.
+
+### Fixed
+
+- Test suite waits on conditions instead of fixed sleeps, eliminating timing
+  flakes on slow runners (#166, #167); platform-specific config skips are
+  declared explicitly (#153).
 
 ## [0.12.0] — 2026-07-07
 
