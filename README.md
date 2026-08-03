@@ -27,7 +27,7 @@ Standalone hosts (Claude Desktop, systemd, plain CLI) can provide
 credentials through CLI flags, a hardened `--config` JSON file, or
 environment variables. Claude Code plugin installs write a
 `0600`-mode `env.json` into the per-plugin `${CLAUDE_PLUGIN_DATA}`
-directory at proxy startup so the auto-spawned monitor process can
+directory at proxy startup so the skill-armed monitor process can
 read its credentials via `--config=PATH`; the file is owned by the
 plugin's data dir and is overwritten atomically on every proxy
 startup.
@@ -61,7 +61,7 @@ The plugin manifest threads both credentials (`SNAPPER_BASE_URL`,
 `SNAPPER_ACCESS_TOKEN`) into the proxy MCP subprocess as env vars via
 `${user_config.KEY}` interpolation. The proxy then writes a
 `0600`-mode `env.json` snapshot into `${CLAUDE_PLUGIN_DATA}` at
-startup so the auto-spawned watch monitor can read the same values
+startup so the skill-armed watch monitor can read the same values
 via `--config="${CLAUDE_PLUGIN_DATA}/env.json"`. Claude Code stores
 `sensitive: true` user_config values in the OS keychain when
 available, falling back to `~/.claude/.credentials.json` — they
@@ -265,13 +265,20 @@ Exit codes:
 The same `--config=PATH`, `--access-token`, and `--base-url` flags
 the proxy + watch subcommands accept also work for `check`.
 
-## Plugin monitor entry
+## Arming the monitor: the `wake` skill
 
-The plugin manifest's `monitors[]` block auto-spawns
-`snapper-mcp watch` on plugin install. The monitor command reads
-credentials from the same `--config=PATH` JSON file the proxy MCP
-server seeded into `${CLAUDE_PLUGIN_DATA}/env.json` at startup. Both
-processes share the same `SNAPPER_ACCESS_TOKEN`.
+Installing the plugin starts no background process. The bundled `wake`
+skill arms the monitor for one session: run `/wake` in the session that
+should answer review requests, and it starts `snapper-mcp watch` as a
+persistent background monitor. A session that never runs it never
+connects, so several open sessions do not compete for the same request
+or burn tokens waiting.
+
+The skill checks for an already-armed monitor before starting one, and
+the monitor is not restored when a session resumes — run `/wake` again
+to re-arm it. Credentials come from the same `--config=PATH` JSON file
+the proxy MCP server seeds into `${CLAUDE_PLUGIN_DATA}/env.json` at
+startup, so both processes share one `SNAPPER_ACCESS_TOKEN`.
 
 ## Development
 

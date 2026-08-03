@@ -9,6 +9,8 @@ const REPO_ROOT = resolve(HERE, "..");
 const PLUGIN_MANIFEST_PATH = resolve(REPO_ROOT, ".claude-plugin/plugin.json");
 const MARKETPLACE_MANIFEST_PATH = resolve(REPO_ROOT, ".claude-plugin/marketplace.json");
 const PACKAGE_JSON_PATH = resolve(REPO_ROOT, "package.json");
+const WAKE_SKILL_PATH = resolve(REPO_ROOT, "skills/wake/SKILL.md");
+const LOCKFILE_PATH = resolve(REPO_ROOT, "package-lock.json");
 
 interface PluginUserConfigField {
   type: string;
@@ -18,20 +20,13 @@ interface PluginUserConfigField {
   sensitive?: boolean;
 }
 
-interface PluginMonitorEntry {
-  name: string;
-  command: string;
-  description: string;
-  when?: string;
-}
-
 interface PluginManifest {
   name: string;
   version: string;
   description: string;
   userConfig: Record<string, PluginUserConfigField>;
   mcpServers: Record<string, { args: string[]; env: Record<string, string> }>;
-  monitors: PluginMonitorEntry[];
+  monitors?: unknown;
 }
 
 function loadJson<T>(path: string): T {
@@ -78,52 +73,79 @@ describe("plugin manifest", () => {
     ]);
   });
 
-  it("ships a single monitor entry with all required fields", () => {
-    expect(Array.isArray(manifest.monitors)).toBe(true);
-    expect(manifest.monitors).toHaveLength(1);
-    const monitor = manifest.monitors[0];
-    expect(monitor.name).toBe("snapper-watch");
-    expect(monitor.description.length).toBeGreaterThan(0);
-    expect(typeof monitor.command).toBe("string");
-    expect(monitor.command.length).toBeGreaterThan(0);
-  });
-
-  it(`pins the monitor command to the @${"${pkg.version}"} runtime tag`, () => {
-    const monitor = manifest.monitors[0];
-    expect(monitor.command).toContain(`@mateusz-klatt/snapper-mcp@${pkg.version}`);
-  });
-
-  it("invokes the watch subcommand", () => {
-    const monitor = manifest.monitors[0];
-    expect(monitor.command).toMatch(/snapper-mcp@[^\s]+\s+watch\b/);
-  });
-
-  it("passes the plugin data config path to the monitor command in quoted form", () => {
-    const monitor = manifest.monitors[0];
-    expect(monitor.command).toContain('--config="${CLAUDE_PLUGIN_DATA}/env.json"');
-  });
-
-  it("does not place credential values or user_config substitutions in the monitor command", () => {
-    const monitor = manifest.monitors[0];
-    expect(monitor.command).not.toContain("${user_config.");
-    expect(monitor.command).not.toContain("SNAPPER_ACCESS_TOKEN");
-  });
-
-  it("does NOT shell-wrap or env-prefix the monitor command", () => {
-    const monitor = manifest.monitors[0];
-    expect(monitor.command).not.toContain("cross-env");
-    expect(monitor.command).not.toMatch(/\bsh\s+-c\b/);
-    expect(monitor.command).not.toMatch(/\bcmd\s+\/[Cc]\b/);
-  });
-
-  it("starts with `npx -y` so the runtime tarball resolves regardless of the operator's npm cache state", () => {
-    const monitor = manifest.monitors[0];
-    expect(monitor.command).toMatch(/^npx\s+-y\s+/);
+  it("declares no monitors, so installing the plugin starts no background process", () => {
+    expect(manifest.monitors).toBeUndefined();
   });
 
   it("keeps marketplace metadata + nested plugin entry in lockstep with the runtime version", () => {
     expect(marketplace.metadata.version).toBe(pkg.version);
     expect(marketplace.plugins).toHaveLength(1);
     expect(marketplace.plugins[0].version).toBe(pkg.version);
+  });
+
+  it("keeps the lockfile in lockstep with the runtime version", () => {
+    const lock = loadJson<{ version: string; packages: Record<string, { version?: string }> }>(
+      LOCKFILE_PATH,
+    );
+    expect(lock.version).toBe(pkg.version);
+    expect(lock.packages[""].version).toBe(pkg.version);
+  });
+});
+
+describe("wake skill", () => {
+  const skill = readFileSync(WAKE_SKILL_PATH, "utf8");
+  const manifestSource = readFileSync(PLUGIN_MANIFEST_PATH, "utf8");
+  const pkg = loadJson<{ version: string }>(PACKAGE_JSON_PATH);
+  const RUNTIME_TAG = /@mateusz-klatt\/snapper-mcp@(\d+\.\d+\.\d+)/g;
+
+  it("is named `wake` and cannot be invoked by the model", () => {
+    expect(skill).toMatch(/^---\r?\n/);
+    expect(skill).toMatch(/^name:\s*wake\s*$/m);
+    expect(skill).toMatch(/^disable-model-invocation:\s*true\s*$/m);
+  });
+
+  it("carries the exact arm command: pinned tag, watch subcommand, seeded config path", () => {
+    expect(skill).toContain(
+      `npx -y @mateusz-klatt/snapper-mcp@${pkg.version} watch --config="$CLAUDE_PLUGIN_DATA/env.json"`,
+    );
+  });
+
+  it("leaves no stale runtime pin anywhere in the skill or the manifest", () => {
+    for (const source of [skill, manifestSource]) {
+      const pins = [...source.matchAll(RUNTIME_TAG)].map((match) => match[1]);
+      expect(pins.length).toBeGreaterThan(0);
+      for (const pin of pins) expect(pin).toBe(pkg.version);
+    }
+  });
+
+  it("carries no credential values or manifest substitutions", () => {
+    expect(skill).not.toContain("${user_config.");
+    expect(skill).not.toMatch(/SNAPPER_ACCESS_TOKEN\s*=/);
+    expect(skill).not.toMatch(/--access-token[= ]\s*[A-Za-z0-9._-]{20,}/);
+  });
+
+  it("orders the duplicate guard and the config preflight ahead of the arm command", () => {
+    const guard = skill.indexOf("pgrep");
+    const preflight = skill.indexOf("test -f");
+    const arm = skill.indexOf("npx -y");
+    expect(guard).toBeGreaterThanOrEqual(0);
+    expect(preflight).toBeGreaterThan(guard);
+    expect(arm).toBeGreaterThan(preflight);
+  });
+
+  it("verifies the subscription covers review requests after arming", () => {
+    const arm = skill.indexOf("npx -y");
+    const verify = skill.indexOf("subscribing to topics");
+    expect(verify).toBeGreaterThan(arm);
+    expect(skill).toContain("ai_reviews.");
+  });
+
+  it("demands the event-per-line monitor primitive, not a backgrounded shell", () => {
+    expect(skill).toContain("Monitor tool");
+    expect(skill).toMatch(/never to exit|no wakeups/);
+  });
+
+  it("warns that --topic would drop the review-request subscription", () => {
+    expect(skill).toContain("--topic");
   });
 });

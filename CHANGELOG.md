@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-08-03
+
+### Fixed: the monitor is armed by `/wake`, per session
+
+Released 0.13.0 declared its monitor **ungated**, so installing the plugin
+started a watch process that ran in every session — several open sessions all
+connected and competed for the same request. The fix attempted after that tag
+gated the declaration with `when: "on-skill-invoke:wake"`, but that trigger
+does not start a monitor in the current Claude Code release: verified against
+2.1.220 with the skill both invoked as a slash command and dispatched by the
+model, only the suppression half fires. Gated, it never armed; ungated, it
+always armed. Neither is what the plugin wants.
+
+0.14.0 declares no monitor at all. The `wake` skill arms one for the current
+session instead: it checks whether the machine is already watching, resolves
+the seeded credentials, starts `snapper-mcp watch` through the host's monitor
+primitive, and confirms the subscription list contains `ai_reviews.` before
+reporting success. A session that never runs `/wake` never connects, consumes
+tokens, or competes for a request.
+
+### Upgrading from 0.13.0
+
+Installing 0.14.0 removes the monitor declaration but does **not** stop a
+watch process 0.13.0 already started. Stop the leftover monitor — or restart
+your Claude Code host — before running `/wake`, otherwise two monitors handle
+every request. `pgrep -af "snapper-mcp.*watch"` shows whether one is running.
+
+### Changed
+
+- Installing the plugin no longer spawns a background process. Run `/wake` in
+  the session that should answer review requests, once per session — it is not
+  restored when a session resumes.
+- The `wake` skill carries the command it arms, pinned to the matching runtime
+  tag. It reads credentials from the `env.json` the proxy MCP server seeds, and
+  falls back to `--base-url` / `--access-token` flags or the
+  `SNAPPER_BASE_URL` + `SNAPPER_ACCESS_TOKEN` environment variables.
+
 ## [0.13.0] — 2026-08-02
 
 ### New: foreign review requests are held, not woken (#172)
@@ -27,7 +64,7 @@ unavailable, every request wakes the agent as before.
 
 ### Changed
 
-- Wire contract regenerated for the auth D4a `ai_reviewer` role (#148) and the
+- Wire contract regenerated for the auth `ai_reviewer` role (#148) and the
   researcher role (#145).
 - Dependencies refreshed to latest across the board.
 
