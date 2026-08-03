@@ -32,7 +32,7 @@
  */
 
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type {
   Notification,
   Request,
@@ -81,6 +81,8 @@ type ForwardEntry = {
   readonly schema: z.ZodTypeAny;
   readonly method: string;
 };
+
+type StdioProxyServer = McpServer["server"];
 
 /**
  * Methods the bridge forwards from host → server, each gated by the
@@ -161,7 +163,7 @@ export function supportedMirroredCapabilities(
 }
 
 export function wireProxy(
-  stdioServer: Server,
+  stdioServer: StdioProxyServer,
   httpClient: Client,
   capabilities: ServerCapabilities,
   pending: ProxyPending,
