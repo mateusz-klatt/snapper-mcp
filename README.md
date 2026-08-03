@@ -27,7 +27,7 @@ Standalone hosts (Claude Desktop, systemd, plain CLI) can provide
 credentials through CLI flags, a hardened `--config` JSON file, or
 environment variables. Claude Code plugin installs write a
 `0600`-mode `env.json` into the per-plugin `${CLAUDE_PLUGIN_DATA}`
-directory at proxy startup so the auto-spawned monitor process can
+directory at proxy startup so the skill-armed monitor process can
 read its credentials via `--config=PATH`; the file is owned by the
 plugin's data dir and is overwritten atomically on every proxy
 startup.
@@ -61,7 +61,7 @@ The plugin manifest threads both credentials (`SNAPPER_BASE_URL`,
 `SNAPPER_ACCESS_TOKEN`) into the proxy MCP subprocess as env vars via
 `${user_config.KEY}` interpolation. The proxy then writes a
 `0600`-mode `env.json` snapshot into `${CLAUDE_PLUGIN_DATA}` at
-startup so the auto-spawned watch monitor can read the same values
+startup so the skill-armed watch monitor can read the same values
 via `--config="${CLAUDE_PLUGIN_DATA}/env.json"`. Claude Code stores
 `sensitive: true` user_config values in the OS keychain when
 available, falling back to `~/.claude/.credentials.json` — they

@@ -54,7 +54,7 @@ unavailable, every request wakes the agent as before.
 
 ### Changed
 
-- Wire contract regenerated for the auth D4a `ai_reviewer` role (#148) and the
+- Wire contract regenerated for the auth `ai_reviewer` role (#148) and the
   researcher role (#145).
 - Dependencies refreshed to latest across the board.
 

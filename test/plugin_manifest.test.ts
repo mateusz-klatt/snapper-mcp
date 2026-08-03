@@ -85,7 +85,9 @@ describe("plugin manifest", () => {
 
 describe("wake skill", () => {
   const skill = readFileSync(WAKE_SKILL_PATH, "utf8");
+  const manifestSource = readFileSync(PLUGIN_MANIFEST_PATH, "utf8");
   const pkg = loadJson<{ version: string }>(PACKAGE_JSON_PATH);
+  const RUNTIME_TAG = /@mateusz-klatt\/snapper-mcp@(\d+\.\d+\.\d+)/g;
 
   it("is named `wake` and cannot be invoked by the model", () => {
     expect(skill).toMatch(/^---\r?\n/);
@@ -93,20 +95,38 @@ describe("wake skill", () => {
     expect(skill).toMatch(/^disable-model-invocation:\s*true\s*$/m);
   });
 
-  it(`pins the arm command to the @${"${pkg.version}"} runtime tag`, () => {
-    expect(skill).toContain(`@mateusz-klatt/snapper-mcp@${pkg.version}`);
+  it("carries the exact arm command: pinned tag, watch subcommand, seeded config path", () => {
+    expect(skill).toContain(
+      `npx -y @mateusz-klatt/snapper-mcp@${pkg.version} watch --config="$CLAUDE_PLUGIN_DATA/env.json"`,
+    );
   });
 
-  it("arms the watch subcommand via `npx -y`", () => {
-    expect(skill).toMatch(/npx\s+-y\s+@mateusz-klatt\/snapper-mcp@[^\s]+\s+watch\b/);
+  it("leaves no stale runtime pin anywhere in the skill or the manifest", () => {
+    for (const source of [skill, manifestSource]) {
+      const pins = [...source.matchAll(RUNTIME_TAG)].map((match) => match[1]);
+      expect(pins.length).toBeGreaterThan(0);
+      for (const pin of pins) expect(pin).toBe(pkg.version);
+    }
   });
 
   it("carries no credential values or manifest substitutions", () => {
     expect(skill).not.toContain("${user_config.");
     expect(skill).not.toMatch(/SNAPPER_ACCESS_TOKEN\s*=/);
+    expect(skill).not.toMatch(/--access-token[= ]\s*[A-Za-z0-9._-]{20,}/);
   });
 
-  it("tells the reader to check for an existing monitor before starting one", () => {
-    expect(skill.toLowerCase()).toContain("already");
+  it("orders the duplicate guard and the config preflight ahead of the arm command", () => {
+    const guard = skill.indexOf("background tasks");
+    const preflight = skill.indexOf("test -f");
+    const arm = skill.indexOf("npx -y");
+    expect(guard).toBeGreaterThanOrEqual(0);
+    expect(preflight).toBeGreaterThan(guard);
+    expect(arm).toBeGreaterThan(preflight);
+  });
+
+  it("requires confirming the monitor survived startup after arming it", () => {
+    const arm = skill.indexOf("npx -y");
+    const verify = skill.indexOf("survived startup");
+    expect(verify).toBeGreaterThan(arm);
   });
 });
