@@ -265,13 +265,20 @@ Exit codes:
 The same `--config=PATH`, `--access-token`, and `--base-url` flags
 the proxy + watch subcommands accept also work for `check`.
 
-## Plugin monitor entry
+## Arming the monitor: the `wake` skill
 
-The plugin manifest's `monitors[]` block auto-spawns
-`snapper-mcp watch` on plugin install. The monitor command reads
-credentials from the same `--config=PATH` JSON file the proxy MCP
-server seeded into `${CLAUDE_PLUGIN_DATA}/env.json` at startup. Both
-processes share the same `SNAPPER_ACCESS_TOKEN`.
+Installing the plugin starts no background process. The bundled `wake`
+skill arms the monitor for one session: run `/wake` in the session that
+should answer review requests, and it starts `snapper-mcp watch` as a
+persistent background monitor. A session that never runs it never
+connects, so several open sessions do not compete for the same request
+or burn tokens waiting.
+
+The skill checks for an already-armed monitor before starting one, and
+the monitor is not restored when a session resumes — run `/wake` again
+to re-arm it. Credentials come from the same `--config=PATH` JSON file
+the proxy MCP server seeds into `${CLAUDE_PLUGIN_DATA}/env.json` at
+startup, so both processes share one `SNAPPER_ACCESS_TOKEN`.
 
 ## Development
 

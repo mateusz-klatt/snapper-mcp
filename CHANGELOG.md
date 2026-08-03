@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-08-03
+
+### Fixed: `/wake` now actually starts the monitor
+
+0.13.0 gated the bundled monitor with `when: "on-skill-invoke:wake"` so it
+would start only in a session that asked for it. That trigger does not start
+the monitor in the current Claude Code release — verified against 2.1.220 with
+the skill invoked both as a slash command and dispatched by the model — so
+`/wake` printed its text and armed nothing, and no session ever received
+review requests.
+
+The plugin no longer declares a monitor at all. Instead the `wake` skill
+instructs the agent to start `snapper-mcp watch` itself as a persistent
+background monitor, after checking that this session has not already armed
+one. This keeps the property 0.13.0 was after — a session that never runs
+`/wake` never connects, consumes tokens, or competes for the same request —
+and it works today.
+
+### Changed
+
+- Installing the plugin no longer spawns a background process. Run the `wake`
+  skill in the session that should answer review requests.
+- The `wake` skill carries the command it arms, pinned to the matching runtime
+  tag. It reads credentials from the `env.json` the proxy MCP server seeds, and
+  falls back to `--base-url` / `--access-token` flags or the
+  `SNAPPER_BASE_URL` + `SNAPPER_ACCESS_TOKEN` environment variables.
+
 ## [0.13.0] — 2026-08-02
 
 ### New: foreign review requests are held, not woken (#172)
