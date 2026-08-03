@@ -36,7 +36,10 @@
     "snapper": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@mateusz-klatt/snapper-mcp@0.13.0"],
+      "args": [
+        "-y",
+        "@mateusz-klatt/snapper-mcp@0.13.0"
+      ],
       "env": {
         "SNAPPER_BASE_URL": "${user_config.SNAPPER_BASE_URL}",
         "SNAPPER_ACCESS_TOKEN": "${user_config.SNAPPER_ACCESS_TOKEN}"
@@ -47,7 +50,8 @@
     {
       "name": "snapper-watch",
       "command": "npx -y @mateusz-klatt/snapper-mcp@0.13.0 watch --config=\"${CLAUDE_PLUGIN_DATA}/env.json\"",
-      "description": "Live Snapper signal + order events streamed as JSONL"
+      "description": "Live Snapper signal + order events streamed as JSONL",
+      "when": "on-skill-invoke:wake"
     }
   ]
 }
