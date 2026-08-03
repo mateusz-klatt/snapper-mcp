@@ -73,8 +73,23 @@ describe("plugin manifest", () => {
     ]);
   });
 
-  it("declares no monitors, so installing the plugin starts no background process", () => {
-    expect(manifest.monitors).toBeUndefined();
+  it("ships exactly one monitor, pinned to the runtime tag and invoking watch", () => {
+    const monitors = manifest.monitors as { name: string; command: string; when: string }[];
+    expect(Array.isArray(monitors)).toBe(true);
+    expect(monitors).toHaveLength(1);
+    expect(monitors[0].command).toContain(`@mateusz-klatt/snapper-mcp@${pkg.version}`);
+    expect(monitors[0].command).toMatch(/^npx\s+-y\s+/);
+    expect(monitors[0].command).toContain('--config="${CLAUDE_PLUGIN_DATA}/env.json"');
+    expect(monitors[0].command).not.toContain("${user_config.");
+  });
+
+  it("arms the monitor on the PLUGIN-QUALIFIED skill key, not the bare skill name", () => {
+    // The runtime compares `when === \`on-skill-invoke:${key}\`` where key is the
+    // skill-usage key — for plugin skills that is `<plugin name>:<skill>`. A bare
+    // skill name never matches and the monitor silently never arms, which is what
+    // the reference docs' "the named skill in this plugin" wording invites.
+    const monitors = manifest.monitors as { when: string }[];
+    expect(monitors[0].when).toBe(`on-skill-invoke:${manifest.name}:wake`);
   });
 
   it("keeps marketplace metadata + nested plugin entry in lockstep with the runtime version", () => {
@@ -124,13 +139,20 @@ describe("wake skill", () => {
     expect(skill).not.toMatch(/--access-token[= ]\s*[A-Za-z0-9._-]{20,}/);
   });
 
-  it("orders the duplicate guard and the config preflight ahead of the arm command", () => {
+  it("orders the duplicate guard ahead of the fallback arm command", () => {
     const guard = skill.indexOf("pgrep");
-    const preflight = skill.indexOf("test -f");
     const arm = skill.indexOf("npx -y");
     expect(guard).toBeGreaterThanOrEqual(0);
-    expect(preflight).toBeGreaterThan(guard);
-    expect(arm).toBeGreaterThan(preflight);
+    expect(arm).toBeGreaterThan(guard);
+  });
+
+  it("keeps the config preflight on the fallback path", () => {
+    expect(skill).toContain("test -f");
+  });
+
+  it("names the same qualified trigger the manifest arms on", () => {
+    const manifest = loadJson<{ name: string }>(PLUGIN_MANIFEST_PATH);
+    expect(skill).toContain(`on-skill-invoke:${manifest.name}:wake`);
   });
 
   it("verifies the subscription covers review requests after arming", () => {

@@ -6,13 +6,13 @@
   },
   "metadata": {
     "description": "Claude Code <-> Snapper MCP bridge - trade via natural language. Ships a watch subcommand armed per session by the bundled `wake` skill and sharing the same long-lived AI delegate token as the proxy MCP server.",
-    "version": "0.14.0"
+    "version": "0.15.0"
   },
   "plugins": [
     {
       "name": "snapper-mcp",
       "source": "./",
-      "version": "0.14.0",
+      "version": "0.15.0",
       "description": "Connects Claude Code / Claude Desktop to a Snapper trading backend via the /api/mcp endpoint. Ships a watch subcommand that streams live signal + order events as JSONL, armed per session by the bundled `wake` skill and sharing the same long-lived AI delegate token as the proxy MCP server.",
       "author": {
         "name": "Mateusz Klatt",

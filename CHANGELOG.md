@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-08-03
+
+### Fixed: the monitor is back, and it arms — the trigger needs a QUALIFIED skill name
+
+0.14.0 removed the bundled monitor after concluding that
+`when: "on-skill-invoke:<skill>"` never starts one. **That conclusion was
+wrong, and this release corrects it.** The trigger works; it just does not
+accept the bare skill name the reference docs imply ("the named skill in this
+plugin").
+
+The host compares `when` against `` `on-skill-invoke:${key}` `` where `key` is
+the skill-usage key, and for a plugin skill that key is
+`<plugin name>:<skill>`. So `on-skill-invoke:wake` can never match, while
+`on-skill-invoke:snapper-mcp:wake` arms the monitor within seconds.
+Reproduced both ways on Claude Code 2.1.220, from a clean session with no
+watch process running.
+
+The monitor is therefore declared again, keyed on the qualified name. Running
+`/wake` arms it; a session that never runs `/wake` still starts nothing.
+
+### Changed
+
+- Arming is handled by the host again, so the monitor command's
+  `${CLAUDE_PLUGIN_DATA}` is expanded per plugin by the host rather than
+  resolved in the agent's shell — where, on a machine with several plugins
+  installed, it could point at a different plugin's directory.
+- The `wake` skill now verifies the monitor started and falls back to arming it
+  itself only if the host did not, so the plugin still works on hosts that do
+  not honour the trigger.
+
 ## [0.14.0] — 2026-08-03
 
 ### Fixed: the monitor is armed by `/wake`, per session
