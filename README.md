@@ -267,18 +267,25 @@ the proxy + watch subcommands accept also work for `check`.
 
 ## Arming the monitor: the `wake` skill
 
-Installing the plugin starts no background process. The bundled `wake`
-skill arms the monitor for one session: run `/wake` in the session that
-should answer review requests, and it starts `snapper-mcp watch` as a
-persistent background monitor. A session that never runs it never
-connects, so several open sessions do not compete for the same request
-or burn tokens waiting.
+Installing the plugin starts no background process. Run `/wake` in the
+session that should answer review requests: the manifest declares the
+monitor with `when: "on-skill-invoke:snapper-mcp:wake"`, so the host
+arms it in response to that invocation. A session that never runs
+`/wake` never connects, so several open sessions do not compete for the
+same request or burn tokens waiting. The monitor is not restored when a
+session resumes — run `/wake` again to re-arm it.
 
-The skill checks for an already-armed monitor before starting one, and
-the monitor is not restored when a session resumes — run `/wake` again
-to re-arm it. Credentials come from the same `--config=PATH` JSON file
-the proxy MCP server seeds into `${CLAUDE_PLUGIN_DATA}/env.json` at
-startup, so both processes share one `SNAPPER_ACCESS_TOKEN`.
+Note the **qualified** skill name in that trigger. The host matches
+`when` against `on-skill-invoke:<plugin name>:<skill>`; a bare
+`on-skill-invoke:wake` never matches and the monitor silently never
+arms. The skill verifies the monitor started and arms it itself if the
+host did not, so the plugin still works where the trigger is unsupported.
+
+Credentials come from the `--config=PATH` JSON file the proxy MCP server
+seeds into `${CLAUDE_PLUGIN_DATA}/env.json` at startup, so both
+processes share one `SNAPPER_ACCESS_TOKEN`. Because the host expands
+`${CLAUDE_PLUGIN_DATA}` itself, the monitor always reads this plugin's
+own data directory.
 
 ## Development
 
