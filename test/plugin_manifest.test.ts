@@ -10,6 +10,7 @@ const PLUGIN_MANIFEST_PATH = resolve(REPO_ROOT, ".claude-plugin/plugin.json");
 const MARKETPLACE_MANIFEST_PATH = resolve(REPO_ROOT, ".claude-plugin/marketplace.json");
 const PACKAGE_JSON_PATH = resolve(REPO_ROOT, "package.json");
 const WAKE_SKILL_PATH = resolve(REPO_ROOT, "skills/wake/SKILL.md");
+const LOCKFILE_PATH = resolve(REPO_ROOT, "package-lock.json");
 
 interface PluginUserConfigField {
   type: string;
@@ -81,6 +82,14 @@ describe("plugin manifest", () => {
     expect(marketplace.plugins).toHaveLength(1);
     expect(marketplace.plugins[0].version).toBe(pkg.version);
   });
+
+  it("keeps the lockfile in lockstep with the runtime version", () => {
+    const lock = loadJson<{ version: string; packages: Record<string, { version?: string }> }>(
+      LOCKFILE_PATH,
+    );
+    expect(lock.version).toBe(pkg.version);
+    expect(lock.packages[""].version).toBe(pkg.version);
+  });
 });
 
 describe("wake skill", () => {
@@ -116,7 +125,7 @@ describe("wake skill", () => {
   });
 
   it("orders the duplicate guard and the config preflight ahead of the arm command", () => {
-    const guard = skill.indexOf("background tasks");
+    const guard = skill.indexOf("pgrep");
     const preflight = skill.indexOf("test -f");
     const arm = skill.indexOf("npx -y");
     expect(guard).toBeGreaterThanOrEqual(0);
@@ -124,9 +133,19 @@ describe("wake skill", () => {
     expect(arm).toBeGreaterThan(preflight);
   });
 
-  it("requires confirming the monitor survived startup after arming it", () => {
+  it("verifies the subscription covers review requests after arming", () => {
     const arm = skill.indexOf("npx -y");
-    const verify = skill.indexOf("survived startup");
+    const verify = skill.indexOf("subscribing to topics");
     expect(verify).toBeGreaterThan(arm);
+    expect(skill).toContain("ai_reviews.");
+  });
+
+  it("demands the event-per-line monitor primitive, not a backgrounded shell", () => {
+    expect(skill).toContain("Monitor tool");
+    expect(skill).toMatch(/never to exit|no wakeups/);
+  });
+
+  it("warns that --topic would drop the review-request subscription", () => {
+    expect(skill).toContain("--topic");
   });
 });
