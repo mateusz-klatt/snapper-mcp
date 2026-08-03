@@ -1,5 +1,4 @@
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type {
   Notification,
   ServerCapabilities,
@@ -22,6 +21,7 @@ import { waitFor } from "./helpers/wait_for.js";
 
 type HandlerFn = (request: unknown, extra: unknown) => Promise<unknown> | unknown;
 type NotificationHandlerFn = (notification: unknown) => void | Promise<void>;
+type StdioProxyServer = Parameters<typeof wireProxy>[0];
 
 function silentLogger() {
   return createLogger({ prefix: "proxy-test", level: "error", timestamps: false });
@@ -43,7 +43,7 @@ function makeProxyHarness(capabilities: ServerCapabilities) {
       notificationHandlers.set(method, handler);
     },
     notification: vi.fn(async () => {}),
-  } as unknown as Server;
+  } as unknown as StdioProxyServer;
 
   const httpClient = {
     request: vi.fn(async () => ({ result: "ok" })),

@@ -14,8 +14,8 @@
  *   7. Extract backend identity from client.getServerVersion()
  *      (Implementation | undefined — the older getServerName()
  *      method does not exist in SDK v1.29).
- *   8. Server({name, version}, {capabilities: mirrored}) — stdio side
- *      announces EXACTLY what Snapper advertised; no more, no less.
+ *   8. McpServer({name, version}, {capabilities: mirrored}) — stdio
+ *      side announces EXACTLY what Snapper advertised; no more, no less.
  *   9. wireProxy(...) — register handlers for advertised capabilities
  *      + fallbackNotificationHandler for reverse path.
  *  10. installShutdownHandlers(...) — SIGTERM/SIGINT drain with
@@ -23,14 +23,14 @@
  *  11. stdioServer.connect(new StdioServerTransport()).
  *  12. Banner log to stderr: bridge is live.
  *
- * Errors surfaced to stderr + exit(1) happen BEFORE the stdio Server
+ * Errors surfaced to stderr + exit(1) happen BEFORE the stdio MCP server
  * accepts traffic, so Claude Desktop sees "MCP server failed to
  * start" with the actionable reason in the subprocess stderr tail.
  */
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
 import { createBridgeFetch } from "./bridge_fetch.js";
@@ -127,12 +127,12 @@ export async function main(options: MainOptions = {}): Promise<void> {
   };
   let shuttingDown = false;
 
-  const stdioServer = new Server(
+  const stdioServer = new McpServer(
     { name: backendName, version: backendVersion },
     { capabilities: mirroredCapabilities },
   );
 
-  wireProxy(stdioServer, httpClient, mirroredCapabilities, pending, logger, {
+  wireProxy(stdioServer.server, httpClient, mirroredCapabilities, pending, logger, {
     shuttingDown: () => shuttingDown,
   });
 

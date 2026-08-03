@@ -1,7 +1,7 @@
 /**
  * SIGTERM/SIGINT drain sequence.
  *
- * SDK v1.29 does NOT provide a drain primitive — `Server.close()`
+ * SDK v1.30 does NOT provide a drain primitive — `McpServer.close()`
  * delegates to the underlying transport's `close()`, which aborts
  * pending work rather than awaiting it. All drain coordination is
  * therefore app-owned:
@@ -27,15 +27,18 @@
  */
 
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 
 import type { Logger } from "./logger.js";
 import type { ProxyPending } from "./proxy.js";
 
 export const DRAIN_TIMEOUT_MS = 10_000;
 
+interface CloseableServer {
+  close(): Promise<void>;
+}
+
 export interface ShutdownContext {
-  readonly stdioServer: Server;
+  readonly stdioServer: CloseableServer;
   readonly httpClient: Client;
   readonly pending: ProxyPending;
   readonly logger: Logger;

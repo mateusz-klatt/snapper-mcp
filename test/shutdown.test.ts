@@ -1,11 +1,16 @@
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createLogger } from "../src/logger.js";
 import type { ProxyPending } from "../src/proxy.js";
-import { DRAIN_TIMEOUT_MS, createShutdownHandlers } from "../src/shutdown.js";
+import {
+  DRAIN_TIMEOUT_MS,
+  createShutdownHandlers,
+  type ShutdownContext,
+} from "../src/shutdown.js";
 import { waitFor } from "./helpers/wait_for.js";
+
+type CloseableServer = ShutdownContext["stdioServer"];
 
 function silentLogger() {
   return createLogger({ prefix: "shutdown-test", level: "error", timestamps: false });
@@ -24,10 +29,10 @@ function makeCloseableClient(): Client & { close: ReturnType<typeof vi.fn> } {
   } as unknown as Client & { close: ReturnType<typeof vi.fn> };
 }
 
-function makeCloseableServer(): Server & { close: ReturnType<typeof vi.fn> } {
+function makeCloseableServer(): CloseableServer & { close: ReturnType<typeof vi.fn> } {
   return {
     close: vi.fn(async () => undefined),
-  } as unknown as Server & { close: ReturnType<typeof vi.fn> };
+  } as CloseableServer & { close: ReturnType<typeof vi.fn> };
 }
 
 describe("createShutdownHandlers — constants + install/uninstall", () => {
