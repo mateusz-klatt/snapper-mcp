@@ -67,7 +67,7 @@
     "@vitest/coverage-v8": "^4.1.11",
     "eslint": "^10",
     "globals": "^17.11.0",
-    "simple-git-hooks": "^2.13",
+    "simple-git-hooks": "^2.14",
     "tsup": "^8",
     "typescript": "^6.0",
     "vitest": "^4.1"
@@ -76,7 +76,7 @@
     "esbuild": "^0.28.1"
   },
   "simple-git-hooks": {
-    "pre-commit": "npx gitleaks protect --staged -v --config=.gitleaks.toml"
+    "pre-commit": "gitleaks protect --staged -v --config=.gitleaks.toml"
   },
   "publishConfig": {
     "access": "public"
