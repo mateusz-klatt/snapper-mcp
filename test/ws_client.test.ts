@@ -1243,12 +1243,58 @@ describeWithTcp("ws_client — periodic dedup pruning", () => {
   });
 });
 
+describe("ws_client — reconnect scheduling", () => {
+  it("waits for each increasing backoff and cancels the next attempt on close", async () => {
+    vi.useFakeTimers();
+    const fetchWsToken = vi.fn<WsClientOptions["fetchWsToken"]>()
+      .mockRejectedValue(new Error("token service unavailable"));
+    const client = createWsClient({
+      wsUrl: new URL("ws://127.0.0.1/api/ws"),
+      tokenStore: new TokenStore({ access: "access", refresh: "refresh" }),
+      fetchWsToken,
+      topics: ["signals."],
+      minter: new EnvelopeMinter(),
+      onFrame: vi.fn(),
+      logger: SILENT_LOGGER,
+      reconnectBackoffBaseMs: 100,
+      reconnectBackoffMaxMs: 250,
+      reconnectJitterFraction: 0,
+    });
+    const running = client.run();
+    try {
+      await vi.advanceTimersByTimeAsync(99);
+      expect(fetchWsToken).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(fetchWsToken).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(199);
+      expect(fetchWsToken).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(fetchWsToken).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(249);
+      expect(fetchWsToken).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(fetchWsToken).toHaveBeenCalledTimes(4);
+
+      await client.close();
+      await running;
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(fetchWsToken).toHaveBeenCalledTimes(4);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      await client.close();
+      await running;
+      vi.useRealTimers();
+    }
+  });
+});
+
 describeWithTcp("ws_client — close()", () => {
   it("close() before run() resolves immediately and run() returns", async () => {
     const server = await startServer([]);
     const client = createWsClient(makeOptions(server));
     await client.close();
     await client.close();
+    await client.run();
     expect(server.connections).toHaveLength(0);
   });
 

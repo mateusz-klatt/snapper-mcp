@@ -383,23 +383,18 @@ export function parseCliFlags(argv: readonly string[]): { flags: CliFlags; remai
 
 export async function loadConfigFile(path: string, logger: Logger = NOOP_LOGGER): Promise<ConfigFile | null> {
   let stats: Stats | undefined;
-  for (let attempt = 0; ; attempt += 1) {
+  for (let attempt = 0; attempt <= CONFIG_FILE_RETRIES; attempt += 1) {
+    if (attempt > 0) await sleep(CONFIG_FILE_RETRY_DELAY_MS);
     try {
       stats = await stat(path);
       break;
     } catch (err) {
-      if (isNodeError(err) && err.code === "ENOENT") {
-        if (attempt >= CONFIG_FILE_RETRIES) return null;
-        await sleep(CONFIG_FILE_RETRY_DELAY_MS);
-        continue;
-      }
+      if (isNodeError(err) && err.code === "ENOENT") continue;
       throw formatConfigStatError(path, err);
     }
   }
 
-  if (stats === undefined) {
-    throw new EnvValidationError(`Cannot read config file ${path}: stat did not complete.`);
-  }
+  if (stats === undefined) return null;
   assertConfigFileHardening(path, stats, logger);
   let text: string;
   try {

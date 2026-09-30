@@ -319,6 +319,15 @@ export function createWsClient(opts: WsClientOptions): WsClient {
     });
   }
 
+  async function waitForReconnect(): Promise<boolean> {
+    if (shutdownRequested) return false;
+    const backoff = computeBackoffMs(reconnectAttempt);
+    reconnectAttempt += 1;
+    opts.logger.info(`watch: reconnecting in ${backoff}ms (attempt ${reconnectAttempt})`);
+    await sleep(backoff);
+    return !shutdownRequested;
+  }
+
   async function runForever(): Promise<void> {
     startPruneTimer();
     try {
@@ -333,11 +342,7 @@ export function createWsClient(opts: WsClientOptions): WsClient {
           const message = formatError(err);
           opts.logger.warn(`watch: session error (will reconnect): ${message}`);
         }
-        if (shutdownRequested) break;
-        const backoff = computeBackoffMs(reconnectAttempt);
-        reconnectAttempt += 1;
-        opts.logger.info(`watch: reconnecting in ${backoff}ms (attempt ${reconnectAttempt})`);
-        await sleep(backoff);
+        if (!(await waitForReconnect())) break;
       }
     } finally {
       stopPruneTimer();
