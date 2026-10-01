@@ -112,6 +112,7 @@ describe("wake skill", () => {
   const manifestSource = readFileSync(PLUGIN_MANIFEST_PATH, "utf8");
   const pkg = loadJson<{ version: string }>(PACKAGE_JSON_PATH);
   const RUNTIME_TAG = /@mateusz-klatt\/snapper-mcp@(\d+\.\d+\.\d+)/g;
+  const RESOLVED_CONFIG_PATH = "/absolute/path/to/snapper-mcp/data/env.json";
 
   it("is named `wake` and cannot be invoked by the model", () => {
     expect(skill).toMatch(/^---\r?\n/);
@@ -119,10 +120,11 @@ describe("wake skill", () => {
     expect(skill).toMatch(/^disable-model-invocation:\s*true\s*$/m);
   });
 
-  it("carries the exact arm command: pinned tag, watch subcommand, seeded config path", () => {
+  it("carries the pinned arm command with an explicitly resolved plugin config path", () => {
     expect(skill).toContain(
-      `npx -y @mateusz-klatt/snapper-mcp@${pkg.version} watch --config="$CLAUDE_PLUGIN_DATA/env.json"`,
+      `npx -y @mateusz-klatt/snapper-mcp@${pkg.version} watch --config="${RESOLVED_CONFIG_PATH}"`,
     );
+    expect(skill).not.toMatch(/--config="\$\{?CLAUDE_PLUGIN_DATA/);
   });
 
   it("leaves no stale runtime pin anywhere in the skill or the manifest", () => {
@@ -144,10 +146,16 @@ describe("wake skill", () => {
     const arm = skill.indexOf("npx -y");
     expect(guard).toBeGreaterThanOrEqual(0);
     expect(arm).toBeGreaterThan(guard);
+    const ownership = skill.indexOf("host monitor record belongs to this session");
+    expect(ownership).toBeGreaterThan(guard);
+    expect(arm).toBeGreaterThan(ownership);
   });
 
   it("keeps the config preflight on the fallback path", () => {
-    expect(skill).toContain("test -f");
+    const preflight = skill.indexOf(`test -f "${RESOLVED_CONFIG_PATH}"`);
+    expect(preflight).toBeGreaterThan(skill.indexOf("pgrep"));
+    expect(skill.indexOf("npx -y")).toBeGreaterThan(preflight);
+    expect(skill).toContain("If this check fails");
   });
 
   it("names the same qualified trigger the manifest arms on", () => {
@@ -160,6 +168,7 @@ describe("wake skill", () => {
     const verify = skill.indexOf("subscribing to topics");
     expect(verify).toBeGreaterThan(arm);
     expect(skill).toContain("ai_reviews.");
+    expect(skill).toContain("ai_research.");
   });
 
   it("demands the event-per-line monitor primitive, not a backgrounded shell", () => {

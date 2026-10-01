@@ -49,7 +49,7 @@ In any Claude Code session:
 Claude Code prompts for two values:
 
 - **Snapper API URL** — your backend's `/api/mcp` endpoint.
-- **Access token** — paste from Snapper's *Settings -> AI Delegates*
+- **Access token** — paste from Snapper's *AI Integration*
   page (the config-snippet generator). The same token authenticates
   both the proxy MCP server and the watch monitor.
 
@@ -62,10 +62,9 @@ The plugin manifest threads both credentials (`SNAPPER_BASE_URL`,
 `${user_config.KEY}` interpolation. The proxy then writes a
 `0600`-mode `env.json` snapshot into `${CLAUDE_PLUGIN_DATA}` at
 startup so the skill-armed watch monitor can read the same values
-via `--config="${CLAUDE_PLUGIN_DATA}/env.json"`. Claude Code stores
-`sensitive: true` user_config values in the OS keychain when
-available, falling back to `~/.claude/.credentials.json` — they
-never land in `settings.json` or the manifest.
+via `--config="${CLAUDE_PLUGIN_DATA}/env.json"`. The manifest marks the token
+as `sensitive: true`; the host controls storage of its user configuration.
+The bridge's own credential copy is the protected `env.json` described above.
 
 ### Option 2 — Claude Desktop manual config
 
@@ -81,7 +80,7 @@ macOS, `%APPDATA%\Claude\claude_desktop_config.json` on Windows):
       "args": ["-y", "@mateusz-klatt/snapper-mcp"],
       "env": {
         "SNAPPER_BASE_URL": "https://your-snapper-instance.example.com/api/mcp",
-        "SNAPPER_ACCESS_TOKEN": "<generated via Snapper UI: Settings -> AI Delegates>"
+        "SNAPPER_ACCESS_TOKEN": "<generated via Snapper UI: AI Integration>"
       }
     }
   }
@@ -161,7 +160,7 @@ snapper-mcp check --profile=prod
 
 ## Generating tokens
 
-Snapper ships a **Settings → AI Delegates** UI that issues credentials.
+Snapper's **AI Integration** screen creates delegates and generates their configuration snippets.
 Each delegate emits a single long-lived (~3-month / 90-day) access JWT. Paste
 the value into `SNAPPER_ACCESS_TOKEN`; the same token powers both the
 proxy MCP server and the optional push-wakeup monitor.
@@ -195,7 +194,9 @@ The `t` field is always present in JSON mode regardless of
 `SNAPPER_MCP_LOG_TIMESTAMPS`. Pipe through `jq` for filtering:
 
 ```bash
-npx -y @mateusz-klatt/snapper-mcp 2>&1 | jq 'select(.lvl=="error")'
+SNAPPER_MCP_LOG_FORMAT=json snapper-mcp 2>bridge.log
+# In a separate terminal, inspect stderr without mixing in MCP stdout:
+jq 'select(.lvl=="error")' bridge.log
 ```
 
 `Error` instances in the rest arguments serialise as `{name, message,
