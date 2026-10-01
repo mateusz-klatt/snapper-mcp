@@ -5,7 +5,7 @@ Thanks for your interest. This package is a public-facing bridge — quality bar
 ## Dev setup
 
 ```bash
-# 1. Clone + install (postinstall hooks include `simple-git-hooks` setup).
+# 1. Clone + install (the prepare lifecycle script configures simple-git-hooks).
 git clone https://github.com/mateusz-klatt/snapper-mcp.git
 cd snapper-mcp
 npm install
@@ -27,16 +27,16 @@ Minimum Node version is `>=26.0.0` (matches package engines and the CI matrix).
 make dev-backend
 
 # Back here, verify local bridge configuration.
-SNAPPER_BASE_URL=http://localhost:8000/api/mcp \
-  SNAPPER_ACCESS_TOKEN=$(...) \
-  npm run build
+npm run build
 
+# Set SNAPPER_ACCESS_TOKEN privately in this shell before running the check.
 SNAPPER_BASE_URL=http://localhost:8000/api/mcp \
-  SNAPPER_ACCESS_TOKEN=$(...) \
   node dist/index.js check
 ```
 
-Generate tokens via the Snapper UI's AI Delegates wizard. The tracked
+Generate tokens via the Snapper UI's AI Integration delegate wizard. `check`
+only decodes local configuration and token claims; it does not connect to the
+backend or verify the token signature. The tracked
 Vitest suite is local/mock-only; there is no committed live-backend
 integration test directory.
 

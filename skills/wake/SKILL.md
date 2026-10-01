@@ -14,31 +14,41 @@ Confirm it actually started, then stop:
 1. Check that a watch process is now running:
 
    ```
-   pgrep -af "snapper-mcp.*watch"
+   pgrep -af '[s]napper-mcp.*watch'
    ```
 
-   A task list does not show background monitors, so check the processes. One
-   match means this session is armed — report that and STOP.
-2. If there is **no** match after a few seconds, the host did not honour the
+   Treat matches as candidates: another session or plugin may own them.
+   Confirm the host monitor record belongs to this session and that the
+   process uses this plugin's resolved configuration path. A process match
+   alone does not establish that this session is armed.
+2. If there is **no verified monitor for this session** after a few seconds, the host did not honour the
    trigger (older release, or a monitor left over from an earlier version is
-   holding the name). Arm it yourself instead: start the command below through
+   holding the name). Resolve this plugin's actual seeded `env.json` from the
+   installed `snapper-mcp` data directory or its host configuration. Replace
+   the placeholder in both commands below with that same absolute path.
+   First verify the file exists, without printing its credential contents:
+
+   ```
+   test -f "/absolute/path/to/snapper-mcp/data/env.json"
+   ```
+
+   If this check fails, locate the correct seeded file before continuing.
+   After the check succeeds, start the command below through
    the **Monitor tool**, persistent and without a timeout — NOT a backgrounded
    shell command, which only reports when the process exits, and `watch` is
    built never to exit:
 
    ```
-   npx -y @mateusz-klatt/snapper-mcp@0.15.0 watch --config="$CLAUDE_PLUGIN_DATA/env.json"
+   npx -y @mateusz-klatt/snapper-mcp@0.15.0 watch --config="/absolute/path/to/snapper-mcp/data/env.json"
    ```
 
-   `CLAUDE_PLUGIN_DATA` is set per plugin, so on a machine with several plugins
-   it can point at a different plugin's directory. Verify
-   `test -f "$CLAUDE_PLUGIN_DATA/env.json"` first, and if it is missing find
-   this plugin's seeded `env.json` under the Claude plugin data directory.
+   Do not use an ambient `CLAUDE_PLUGIN_DATA` value without
+   verifying that it belongs to `snapper-mcp`; another plugin can own it.
    Never print the file — it holds a credential. Do not add `--topic`: it
    replaces the defaults and would silently drop `ai_reviews.`.
 3. Either way, before reporting success make sure the monitor survived startup.
    On connect `watch` logs `subscribing to topics: ...`, and that list must
-   include `ai_reviews.`.
+   include both `ai_reviews.` and `ai_research.`.
 
 Once armed, pending review requests addressed to this delegate stream as JSONL
 and wake you; answer each `ai_review.request` before its deadline using the
