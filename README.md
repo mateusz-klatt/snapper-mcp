@@ -5,6 +5,9 @@
 [![license](https://img.shields.io/npm/l/@mateusz-klatt%2Fsnapper-mcp.svg?v=2)](./LICENSE)
 [![CI](https://github.com/mateusz-klatt/snapper-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/mateusz-klatt/snapper-mcp/actions/workflows/ci.yml)
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=mateusz-klatt_snapper-mcp&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=mateusz-klatt_snapper-mcp)
+[![Bugs](https://sonarcloud.io/api/project_badges/measure?project=mateusz-klatt_snapper-mcp&metric=bugs)](https://sonarcloud.io/summary/overall?id=mateusz-klatt_snapper-mcp)
+[![Vulnerabilities](https://sonarcloud.io/api/project_badges/measure?project=mateusz-klatt_snapper-mcp&metric=vulnerabilities)](https://sonarcloud.io/summary/overall?id=mateusz-klatt_snapper-mcp)
+[![Code Smells](https://sonarcloud.io/api/project_badges/measure?project=mateusz-klatt_snapper-mcp&metric=code_smells)](https://sonarcloud.io/summary/overall?id=mateusz-klatt_snapper-mcp)
 [![Claude Code Plugin](https://img.shields.io/badge/Claude_Code-Plugin-ff6a00)](#install)
 
 Lightweight stdio-to-HTTP **Model Context Protocol** bridge. Spawns as a
