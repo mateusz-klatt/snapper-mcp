@@ -55,7 +55,7 @@ public repo.
 - **Zero secrets / real IDs.** No real JWTs, wallet/operator/user IDs. Use
   `jwt-placeholder`, `wallet-demo-01`, etc. — these are allowlisted in
   `.gitleaks.toml`.
-- **No paste from upstream private modules.** This repo is MIT-licensed
+- **No paste from upstream private modules.** This repo is Apache-2.0-licensed
   and public on GitHub + published on npm. Keep it vendor-neutral.
 - **`.env.example` only.** Never commit a real `.env`.
 - **Reviewer pair is expected for non-trivial changes** — at minimum

@@ -2,7 +2,7 @@
 
 [![npm version](https://img.shields.io/npm/v/@mateusz-klatt%2Fsnapper-mcp.svg?v=2)](https://www.npmjs.com/package/@mateusz-klatt/snapper-mcp)
 [![node](https://img.shields.io/node/v/@mateusz-klatt%2Fsnapper-mcp.svg?v=2)](https://nodejs.org/)
-[![license](https://img.shields.io/npm/l/@mateusz-klatt%2Fsnapper-mcp.svg?v=2)](./LICENSE)
+[![license](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](./LICENSE)
 [![CI](https://github.com/mateusz-klatt/snapper-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/mateusz-klatt/snapper-mcp/actions/workflows/ci.yml)
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=mateusz-klatt_snapper-mcp&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=mateusz-klatt_snapper-mcp)
 [![Bugs](https://sonarcloud.io/api/project_badges/measure?project=mateusz-klatt_snapper-mcp&metric=bugs)](https://sonarcloud.io/summary/overall?id=mateusz-klatt_snapper-mcp)
@@ -298,4 +298,9 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for the dev workflow
 
 ## License
 
-MIT — see [LICENSE](./LICENSE).
+[Apache License, Version 2.0](./LICENSE). See [NOTICE](./NOTICE) for attribution.
+Third-party dependencies retain their own licenses.
+
+Revisions through the `last-mit` tag, including previously published npm versions,
+were released under MIT. Subsequent original work is licensed under Apache-2.0;
+earlier MIT grants remain valid.

@@ -20,7 +20,7 @@
       },
       "homepage": "https://github.com/mateusz-klatt/snapper-mcp#readme",
       "repository": "https://github.com/mateusz-klatt/snapper-mcp",
-      "license": "MIT",
+      "license": "Apache-2.0",
       "keywords": [
         "mcp",
         "snapper",
