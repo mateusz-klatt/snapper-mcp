@@ -8,6 +8,7 @@ import { CAN_LISTEN_ON_LOOPBACK } from "./helpers/listen_capability.js";
 import { makeMockSnapperServer, type MockSnapperServer } from "./helpers/mock_snapper_server.js";
 
 const DIST_ENTRY = resolve(__dirname, "..", "dist", "index.js");
+const STARTUP_TIMEOUT_MS = process.platform === "win32" ? 25_000 : 7_000;
 
 interface SubprocessOutcome {
   readonly stdoutLines: readonly string[];
@@ -17,7 +18,7 @@ interface SubprocessOutcome {
 
 async function runBridgeInitialize(
   baseUrl: URL,
-  timeoutMs = 7_000,
+  timeoutMs = STARTUP_TIMEOUT_MS,
   envOverrides: Record<string, string> = {},
 ): Promise<SubprocessOutcome> {
   const child = spawn(process.execPath, [DIST_ENTRY], {
@@ -55,11 +56,9 @@ async function runBridgeInitialize(
   };
   child.stdin.write(`${JSON.stringify(initialize)}\n`);
 
-  // Capture the exit event promise BEFORE any race so we can await it safely
-  // even if the child has already fired `exit` by the time we check
-  // (child.exitCode !== null). Using `once(child, "exit")` after the event
-  // has already fired would hang forever.
-  const exitPromise = once(child, "exit").catch(() => undefined);
+  // Subscribe before any race and wait for streams to drain as well as process exit.
+  // Closing readline at `exit` can discard stdout that is still buffered on Windows.
+  const closePromise = once(child, "close").catch(() => undefined);
 
   let watchdogHandle: NodeJS.Timeout | undefined;
   const exitWatchdog = new Promise<void>((resolve) => {
@@ -88,7 +87,7 @@ async function runBridgeInitialize(
   if (child.exitCode === null) {
     child.kill("SIGTERM");
   }
-  await exitPromise;
+  await closePromise;
   rl.close();
 
   return {
@@ -114,7 +113,7 @@ describe.skipIf(!CAN_LISTEN_ON_LOOPBACK)("stdout byte-purity", () => {
 
   it("every stdout line from the bridge subprocess parses as MCP JSON-RPC", async () => {
     const outcome = await runBridgeInitialize(server.baseUrl);
-    expect(outcome.stdoutLines.length).toBeGreaterThan(0);
+    expect(outcome.stdoutLines.length, outcome.stderrText).toBeGreaterThan(0);
     for (const line of outcome.stdoutLines) {
       const trimmed = line.trim();
       if (trimmed.length === 0) continue;
@@ -136,7 +135,7 @@ describe.skipIf(!CAN_LISTEN_ON_LOOPBACK)("stdout byte-purity", () => {
   it("bridge banner (when not suppressed) goes to stderr, never stdout", async () => {
     const outcome = await runBridgeInitialize(
       server.baseUrl,
-      7_000,
+      STARTUP_TIMEOUT_MS,
       { SNAPPER_MCP_LOG_LEVEL: "info" },
     );
     for (const line of outcome.stdoutLines) {
