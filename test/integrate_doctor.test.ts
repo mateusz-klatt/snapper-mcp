@@ -9,7 +9,10 @@ import { doctorMain, parseDoctorArgs } from "../src/doctor.js";
 import {
   CLAUDE_MARKETPLACE_NAME,
   CLAUDE_PLUGIN_KEY,
+  GROK_SKILL_BODY,
+  KIMI_SKILL_BODY,
   integrateMain,
+  mergeManagedSkillText,
   parseIntegrateArgs,
 } from "../src/integrate.js";
 
@@ -584,12 +587,27 @@ describe("integrateMain & doctorMain across all 7 CLIs", () => {
     await writeFile(path.join(grokSkillDir, "SKILL.md"), ruleOnlySkill, "utf8");
 
     const kimiDir = path.join(homeDir, ".kimi-code");
-    await mkdir(kimiDir, { recursive: true });
+    const kimiSkillDir = path.join(kimiDir, "skills", "snapper");
+    await mkdir(kimiSkillDir, { recursive: true });
     await writeFile(
       path.join(kimiDir, "config.toml"),
       'default_model = "k2"\n\n[[hooks]]\nevent = "SessionStart"\ncommand = "snapper-mcp hook --client kimi --event SessionStart --config /old"\ntimeout = 5\n',
       "utf8",
     );
+    const legacyUnmarkedKimiSkill = [
+      "---",
+      "name: snapper",
+      "description: How to arm and handle one-shot Snapper wake watchers in Kimi Code.",
+      "---",
+      "",
+      "Custom operator preamble.",
+      "",
+      KIMI_SKILL_BODY,
+      "",
+      "Custom operator epilogue.",
+      "",
+    ].join("\n");
+    await writeFile(path.join(kimiSkillDir, "SKILL.md"), legacyUnmarkedKimiSkill, "utf8");
 
     expect(
       await integrateMain({
@@ -601,6 +619,21 @@ describe("integrateMain & doctorMain across all 7 CLIs", () => {
         stderr: new TextCapture(),
       }),
     ).toBe(0);
+
+    const upgradedKimiSkill = await readFile(path.join(kimiSkillDir, "SKILL.md"), "utf8");
+    expect(upgradedKimiSkill).toContain("Custom operator preamble.");
+    expect(upgradedKimiSkill).toContain("Custom operator epilogue.");
+    expect(upgradedKimiSkill).toContain("<!-- BEGIN snapper-mcp -->");
+    expect(upgradedKimiSkill).toContain("<!-- END snapper-mcp -->");
+    expect(upgradedKimiSkill.split("When the UserPromptSubmit hook asks").length - 1).toBe(1);
+
+    const noTrailingNewlineUpgrade = mergeManagedSkillText(
+      `---\nname: snapper\n---\n\n${GROK_SKILL_BODY}`,
+      "---\nname: snapper\n---",
+      GROK_SKILL_BODY,
+    );
+    expect(noTrailingNewlineUpgrade.endsWith("<!-- END snapper-mcp -->\n")).toBe(true);
+    expect(noTrailingNewlineUpgrade.split("A line from `snapper-mcp watch`").length - 1).toBe(1);
 
     const grokTomlAfter = await readFile(path.join(grokDir, "config.toml"), "utf8");
     expect(grokTomlAfter).toContain("\r\n");

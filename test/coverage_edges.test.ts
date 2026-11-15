@@ -426,6 +426,7 @@ describe("interactive, hook, integrate, and doctor remaining branches", () => {
     expect(grokMode(["grok", "-mval"])).toBe("input");
     expect(grokMode(["grok", "-m"])).toBe("unknown");
     expect(grokMode(["grok", "-z"])).toBe("unknown");
+    expect(grokMode(["grok", "--always-approve"])).toBe("input");
     expect(grokMode(["grok", "--resume", "s1"])).toBe("input");
     expect(grokMode(["grok", "--model", "grok-4"])).toBe("input");
     expect(grokMode(["grok", "--model"])).toBe("unknown");
@@ -1371,6 +1372,9 @@ describe.skipIf(!CAN_LISTEN_ON_LOOPBACK)("main proxy wake workers & watch/worker
     const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
     const [stdioCursor] = InMemoryTransport.createLinkedPair();
     const beforeTerm = process.listenerCount("SIGTERM");
+    const beforeInt = process.listenerCount("SIGINT");
+    const beforeUncaught = process.listenerCount("uncaughtException");
+    const beforeUnhandled = process.listenerCount("unhandledRejection");
     await main({
       source: {
         SNAPPER_MCP_HOME: dir,
@@ -1387,15 +1391,25 @@ describe.skipIf(!CAN_LISTEN_ON_LOOPBACK)("main proxy wake workers & watch/worker
     const termListener = process.listeners("SIGTERM")[beforeTerm];
     expect(termListener).toBeDefined();
     termListener?.("SIGTERM");
-    await waitFor(() => closedCount >= 1, { message: "cursor worker closed on SIGTERM" });
+    await waitFor(() => closedCount >= 1 && exitSpy.mock.calls.length >= 1, {
+      message: "cursor worker closed and shutdown drained on SIGTERM",
+    });
 
     while (process.listenerCount("SIGTERM") > beforeTerm) {
       const l = process.listeners("SIGTERM").pop();
       if (l) process.removeListener("SIGTERM", l);
     }
-    while (process.listenerCount("SIGINT") > 0) {
+    while (process.listenerCount("SIGINT") > beforeInt) {
       const l = process.listeners("SIGINT").pop();
       if (l) process.removeListener("SIGINT", l);
+    }
+    while (process.listenerCount("uncaughtException") > beforeUncaught) {
+      const l = process.listeners("uncaughtException").pop();
+      if (l) process.removeListener("uncaughtException", l);
+    }
+    while (process.listenerCount("unhandledRejection") > beforeUnhandled) {
+      const l = process.listeners("unhandledRejection").pop();
+      if (l) process.removeListener("unhandledRejection", l);
     }
 
     const [stdioCodex] = InMemoryTransport.createLinkedPair();

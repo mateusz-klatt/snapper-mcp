@@ -581,6 +581,16 @@ function renderMarkedSkillBlock(body: string): string {
   return `${SKILL_MARKER_START}\n${body.trim()}\n${SKILL_MARKER_END}`;
 }
 
+function replaceSpanEnsuringNewline(
+  source: string,
+  start: number,
+  end: number,
+  replacement: string,
+): string {
+  const joined = `${source.slice(0, start)}${replacement}${source.slice(end)}`;
+  return joined.endsWith("\n") ? joined : `${joined}\n`;
+}
+
 export function mergeManagedSkillText(
   existing: string | null,
   frontmatter: string,
@@ -594,10 +604,22 @@ export function mergeManagedSkillText(
   const startIdx = normalized.indexOf(SKILL_MARKER_START);
   const endIdx = normalized.indexOf(SKILL_MARKER_END);
   if (startIdx >= 0 && endIdx > startIdx) {
-    const before = normalized.slice(0, startIdx);
-    const after = normalized.slice(endIdx + SKILL_MARKER_END.length);
-    const joined = `${before}${marked}${after}`;
-    return joined.endsWith("\n") ? joined : `${joined}\n`;
+    return replaceSpanEnsuringNewline(
+      normalized,
+      startIdx,
+      endIdx + SKILL_MARKER_END.length,
+      marked,
+    );
+  }
+  const bodyTrimmed = body.trim();
+  const bodyIdx = normalized.indexOf(bodyTrimmed);
+  if (bodyIdx >= 0) {
+    return replaceSpanEnsuringNewline(
+      normalized,
+      bodyIdx,
+      bodyIdx + bodyTrimmed.length,
+      marked,
+    );
   }
   const prefix = normalized.endsWith("\n") ? normalized : `${normalized}\n`;
   return `${prefix}\n${marked}\n`;

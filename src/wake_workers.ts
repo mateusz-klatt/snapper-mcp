@@ -298,20 +298,26 @@ function createChildProcessDuplex(
     },
     write(chunk: Buffer | string, encoding: BufferEncoding, callback: (error?: Error | null) => void) {
       const buf = typeof chunk === "string" ? Buffer.from(chunk, encoding) : chunk;
-      childStdin.write(buf, callback);
+      childStdin.write(buf, () => {
+        callback();
+      });
     },
     final(callback: (error?: Error | null) => void) {
-      childStdin.end(callback);
+      childStdin.end(() => {
+        callback();
+      });
     },
   });
+  childStdin.on("error", () => undefined);
+  duplex.on("error", () => undefined);
   childStdout.on("data", (chunk: Buffer) => {
     duplex.push(chunk);
   });
   childStdout.on("end", () => {
     duplex.push(null);
   });
-  childStdout.on("error", (err: Error) => {
-    duplex.destroy(err);
+  childStdout.on("error", () => {
+    duplex.push(null);
   });
   return duplex;
 }
@@ -354,7 +360,7 @@ export async function probeCodexThreadIdleViaProxy(
       finish(false);
     }, timeoutMs);
 
-    child.once("error", () => {
+    child.on("error", () => {
       clearTimeout(timer);
       finish(false);
     });
@@ -365,19 +371,19 @@ export async function probeCodexThreadIdleViaProxy(
       maxPayload: 256 * 1024,
     });
 
-    onAbort = () => {
-      clearTimeout(timer);
-      ws.close();
-      child.kill();
-      finish(false);
-    };
-    signal?.addEventListener("abort", onAbort, { once: true });
-
-    ws.once("error", () => {
+    ws.on("error", () => {
       clearTimeout(timer);
       child.kill();
       finish(false);
     });
+
+    onAbort = () => {
+      clearTimeout(timer);
+      ws.terminate();
+      child.kill();
+      finish(false);
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
 
     ws.once("open", () => {
       ws.send(
@@ -415,7 +421,7 @@ export async function probeCodexThreadIdleViaProxy(
         }
         if (msg.id === 2) {
           clearTimeout(timer);
-          ws.close();
+          ws.terminate();
           child.kill();
           const thread = (
             msg.result as {
@@ -429,7 +435,7 @@ export async function probeCodexThreadIdleViaProxy(
         }
       } catch {
         clearTimeout(timer);
-        ws.close();
+        ws.terminate();
         child.kill();
         finish(false);
       }
@@ -814,6 +820,7 @@ function defaultSpawnDetached(params: {
     stdio: "ignore",
     windowsHide: true,
   });
+  child.on("error", () => undefined);
   child.unref();
   if (typeof child.pid !== "number" || child.pid <= 0) {
     throw new Error("detached Antigravity helper failed to spawn");
