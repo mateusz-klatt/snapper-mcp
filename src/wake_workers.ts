@@ -717,6 +717,7 @@ export async function startCodexWakeWorker(
   const abortController = new AbortController();
   const pendingRecords = new Set<Promise<unknown>>();
   let closed = false;
+  let pendingTrigger = false;
   let activeStepPromise: Promise<void> | null = null;
   let stepTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -804,9 +805,18 @@ export async function startCodexWakeWorker(
   };
 
   const triggerStep = (): void => {
-    if (closed || activeStepPromise !== null) return;
+    if (closed) return;
+    if (activeStepPromise !== null) {
+      pendingTrigger = true;
+      return;
+    }
+    pendingTrigger = false;
     const p = executeStep().finally(() => {
       activeStepPromise = null;
+      if (pendingTrigger && !closed) {
+        pendingTrigger = false;
+        scheduleStep(settleMs);
+      }
     });
     activeStepPromise = p;
   };
