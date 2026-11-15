@@ -34,13 +34,21 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
 import { createBridgeFetch } from "./bridge_fetch.js";
+import { ClientArgError, parseClientName, type ClientName } from "./clients.js";
 import { BridgeStartupError, EnvValidationError } from "./errors.js";
 import { parseCliFlags, parseEnv, redactCliArg, type BridgeEnv } from "./env.js";
 import { createLogger } from "./logger.js";
 import { supportedMirroredCapabilities, wireProxy, type ProxyPending } from "./proxy.js";
 import { seedConfigFileIfPluginContext } from "./seed_config.js";
 import { createShutdownHandlers } from "./shutdown.js";
+import { isWakeEnabled, readWakePreference, resolveStateDir } from "./state_dir.js";
 import { TokenStore } from "./token_store.js";
+import {
+  startCodexWakeWorker,
+  startCursorWakeWorker,
+  type WakeWorkerHandle,
+} from "./wake_workers.js";
+import type { WsClient, WsClientOptions } from "./ws_client.js";
 
 /**
  * `tsup` injects __PKG_VERSION__ / __PKG_NAME__ into the bundled
@@ -70,6 +78,55 @@ export interface MainOptions {
   readonly argv?: readonly string[];
   readonly stdioTransport?: StdioServerTransport;
   readonly install?: boolean;
+  readonly wakeWsClientFactory?: (opts: WsClientOptions) => WsClient;
+}
+
+export interface ProxyWakeFlags {
+  readonly client: ClientName | null;
+  readonly wake: boolean | null;
+  readonly filteredArgv: readonly string[];
+}
+
+export function extractProxyWakeArgs(argv: readonly string[]): ProxyWakeFlags {
+  let client: ClientName | null = null;
+  let wake: boolean | null = null;
+  const filteredArgv: string[] = [];
+
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i]!;
+    if (arg === "--client") {
+      const next = argv[i + 1];
+      if (typeof next !== "string" || next.length === 0) {
+        throw new EnvValidationError("--client requires a CLI name");
+      }
+      try {
+        client = parseClientName(next, "--client");
+      } catch (err) {
+        throw new EnvValidationError(err instanceof ClientArgError ? err.message : String(err));
+      }
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith("--client=")) {
+      try {
+        client = parseClientName(arg.slice("--client=".length), "--client");
+      } catch (err) {
+        throw new EnvValidationError(err instanceof ClientArgError ? err.message : String(err));
+      }
+      continue;
+    }
+    if (arg === "--wake" || arg === "--wake=true") {
+      wake = true;
+      continue;
+    }
+    if (arg === "--no-wake" || arg === "--wake=false") {
+      wake = false;
+      continue;
+    }
+    filteredArgv.push(arg);
+  }
+
+  return { client, wake, filteredArgv };
 }
 
 function rejectUnknownProxyArgs(argv: readonly string[]): void {
@@ -87,9 +144,11 @@ export async function main(options: MainOptions = {}): Promise<void> {
   const logger = createLogger(CLIENT_NAME, source);
 
   let env: BridgeEnv;
+  let proxyWake: ProxyWakeFlags;
   try {
-    rejectUnknownProxyArgs(argv);
-    env = await parseEnv(source, argv, logger);
+    proxyWake = extractProxyWakeArgs(argv);
+    rejectUnknownProxyArgs(proxyWake.filteredArgv);
+    env = await parseEnv(source, proxyWake.filteredArgv, logger);
   } catch (err) {
     if (!(err instanceof EnvValidationError)) throw err;
     logger.error(err.message);
@@ -126,6 +185,7 @@ export async function main(options: MainOptions = {}): Promise<void> {
     pendingReverse: new Set<Promise<unknown>>(),
   };
   let shuttingDown = false;
+  let wakeWorker: WakeWorkerHandle | null = null;
 
   const stdioServer = new McpServer(
     { name: backendName, version: backendVersion },
@@ -143,6 +203,13 @@ export async function main(options: MainOptions = {}): Promise<void> {
     logger,
     setShuttingDown: () => {
       shuttingDown = true;
+      if (wakeWorker !== null) {
+        const closing = wakeWorker.close();
+        pending.pendingReverse.add(closing);
+        void closing.finally(() => {
+          pending.pendingReverse.delete(closing);
+        });
+      }
     },
   });
 
@@ -157,6 +224,31 @@ export async function main(options: MainOptions = {}): Promise<void> {
   } catch (err) {
     handlers.uninstall();
     throw new BridgeStartupError("failed to attach stdio server transport", err);
+  }
+
+  if (proxyWake.client === "codex" || proxyWake.client === "cursor") {
+    const stateDir = resolveStateDir(source);
+    const pref = await readWakePreference(stateDir, proxyWake.client).catch(() => null);
+    const enabled =
+      proxyWake.wake === null
+        ? isWakeEnabled(pref ?? "default")
+        : proxyWake.wake && isWakeEnabled(pref ?? "default");
+    if (enabled) {
+      wakeWorker =
+        proxyWake.client === "codex"
+          ? await startCodexWakeWorker({
+              env,
+              stateDir,
+              logger,
+              wsClientFactory: options.wakeWsClientFactory,
+            })
+          : await startCursorWakeWorker({
+              env,
+              stateDir,
+              logger,
+              wsClientFactory: options.wakeWsClientFactory,
+            });
+    }
   }
 
   logger.info(

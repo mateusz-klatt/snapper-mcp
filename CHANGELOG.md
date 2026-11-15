@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] — 2026-11-15
+
+### Added
+
+- Multi-CLI integration and offline diagnostics via `snapper-mcp integrate <claude|codex|copilot|antigravity|kimi|grok|cursor|all> [--config PATH] [--wake|--no-wake] [--remove]` and `snapper-mcp doctor [--client <cli|all>] [--config PATH]`.
+- Reversible configuration management backed by SHA-256 content tracking, base64 backups in `manifest.json`, and AST-verified TOML surgery (`smol-toml`).
+- Interactive-only session wake (`snapper-mcp hook` and client-scoped `watch` / MCP workers) across Claude Code, Codex, GitHub Copilot CLI, Antigravity, Kimi Code, Grok CLI, and Cursor CLI, with single-instance session locks, duplicate-wake reservations, `decision_ack` echo suppression, and headless `-p` / `exec` print-mode exclusion.
+- `--actionable-only`, `--wake-on`, and `--once` flags on `snapper-mcp watch` with deterministic one-shot exit codes (`0` attention, `10` disabled, `11` duplicate watcher, `12` startup failure, `13` 24-hour expiry).
+
 ## [0.15.0] — 2026-08-03
 
 ### Fixed: the monitor is back, and it arms — the trigger needs a QUALIFIED skill name

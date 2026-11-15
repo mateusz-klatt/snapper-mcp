@@ -7,12 +7,12 @@ const DEFAULT_TIMEOUT_MS = 5_000;
 const POLL_INTERVAL_MS = 10;
 
 export async function waitFor(
-  predicate: () => boolean,
+  predicate: () => boolean | Promise<boolean>,
   { timeoutMs = DEFAULT_TIMEOUT_MS, message }: WaitForOptions,
 ): Promise<void> {
   const startedAt = Date.now();
 
-  while (!predicate()) {
+  while (!(await predicate())) {
     const elapsedMs = Date.now() - startedAt;
     if (elapsedMs >= timeoutMs) {
       throw new Error(`Timed out after ${timeoutMs}ms waiting for ${message}`);
