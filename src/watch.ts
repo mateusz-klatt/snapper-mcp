@@ -2,67 +2,29 @@
  * Subcommand entry for `snapper-mcp watch`.
  *
  * Connects to the Snapper backend's WebSocket endpoint, subscribes to
- * the configured topic prefixes, and writes one JSONL frame per line
- * to stdout. A Claude Code Monitor primitive wired at the host layer
- * reads each stdout line and surfaces it as a notification inside an
- * active conversation, giving the AI delegate push-style wakeup on
- * backend events without polling REST.
- *
- * Argument syntax:
- *
- *     snapper-mcp watch [--topic PREFIX]...
- *
- * `--topic` is repeatable. Each PREFIX MUST end with `.` so it
- * subscribes to a topic family root rather than a single path —
- * the backend rejects anything else as a non-registry-root pattern.
- * If no `--topic` is given, the default subscription is the union
- * of `signals.` and `orders.events.`, matching the two production
- * topic roots most useful for an AI delegate's situational
- * awareness.
- *
- * Lifecycle:
- *
- *   1. Parse argv → `parseWatchArgs`.
- *   2. Resolve credentials from CLI flags, an optional config file,
- *      then environment variables.
- *   3. Construct `TokenStore`, fetch the delegate's own identity once
- *      from `GET /api/auth/me`, and bind a `fetchWsToken` closure that
- *      reads the same access bearer from the store. `fetchWsToken`
- *      calls `POST /api/auth/ws_token` to mint a one-shot WebSocket
- *      token from the access bearer's session.
- *   4. Construct `EnvelopeMinter` (one per process — a stable
- *      session_id across the whole watch run lets server-side gap
- *      detection observe a clean per-client provenance).
- *   5. Construct the `WsClient` with a cheap `onFrame` address filter.
- *      Own AI-review requests pass immediately; foreign requests are
- *      held until the backend's fanout boundary and cancelled if a
- *      matching decision acknowledgement arrives first. Stderr is the
- *      diagnostic channel; stdout is reserved for the JSONL stream.
- *   6. Install one-shot SIGTERM/SIGINT handlers that call
- *      `client.close()` once and resolve the run promise.
- *   7. Await `client.run()` until either the runner exits with an
- *      unrecoverable error or shutdown is requested. Exit code
- *      reflects the path taken: 0 on graceful drain, 1 on fatal
- *      startup or an unrecoverable session error.
- *
- * Test-injection points (all in `WatchOptions`):
- *
- *   - `source`        — replace `process.env`.
- *   - `argv`          — replace argv slice (default `process.argv.slice(3)`).
- *   - `stdout`        — replace the JSONL writer (default
- *                       `process.stdout`).
- *   - `install`       — `false` skips signal handler registration so
- *                       in-process tests don't accidentally trap
- *                       Vitest's own SIGTERM.
- *   - `wsClientFactory` — replace the WS client construction; the
- *                       tests use a real `WebSocketServer` from `ws`
- *                       and inject a wrapped factory that captures
- *                       lifecycle hooks.
+ * the configured topic prefixes, and writes one JSONL frame (or client
+ * wake notice) per line to stdout.
  */
 
 import type { WritableStream } from "node:stream/web";
 import type { Writable } from "node:stream";
 
+import {
+  classifyActionableFrame,
+  DEFAULT_WAKE_KINDS,
+  formatClientAttentionLine,
+  KIMI_EXIT_ATTENTION,
+  KIMI_EXIT_DISABLED,
+  KIMI_EXIT_DUPLICATE,
+  KIMI_EXIT_EXPIRED,
+  KIMI_EXIT_FAILED,
+  KIMI_OUTCOME_LINES,
+  parseWakeKind,
+  SNAPPER_COPILOT_ATTENTION_LINE,
+  SNAPPER_KIMI_ATTENTION_LINE,
+  type WakeKind,
+} from "./actionable.js";
+import { ClientArgError, parseClientName, type ClientName } from "./clients.js";
 import {
   computeWsUrl,
   loadConfigFile,
@@ -76,9 +38,26 @@ import {
 } from "./env.js";
 import { EnvelopeMinter } from "./envelope.js";
 import { EnvValidationError } from "./errors.js";
+import { inspectParentProcess, type ParentProcessInspector } from "./interactive.js";
 import { createLogger, writeStderr, type Logger } from "./logger.js";
+import {
+  acquireSessionLock,
+  defaultConfigFilePath,
+  defaultIsPidAlive,
+  readWakePreference,
+  resolveStateDir,
+  type SessionLockHandle,
+} from "./state_dir.js";
 import { TokenStore } from "./token_store.js";
 import type { AiReviewRequestFrame, ServerFrame } from "./types.js";
+import {
+  runAntigravityWakeCommand,
+  type AntigravityWakeOptions,
+} from "./wake_workers.js";
+import {
+  claimKimiWatcherStart,
+  recordKimiWatcherFinish,
+} from "./wake_state.js";
 import { fetchWsToken, type WsTokenResult } from "./ws_token.js";
 import {
   createWsClient,
@@ -86,12 +65,6 @@ import {
   type WsClientOptions,
 } from "./ws_client.js";
 
-/**
- * `tsup` injects __PKG_NAME__ into the bundled dist via its
- * `define` option. In raw-source test runs the global does not
- * exist, so resolution goes through globalThis to avoid a
- * ReferenceError.
- */
 interface BuildTimeGlobals {
   readonly __PKG_NAME__?: unknown;
 }
@@ -113,6 +86,7 @@ const DEFAULT_TOPICS: readonly string[] = [
 
 const AUTH_ME_TIMEOUT_MS = 10_000;
 const AI_REVIEW_FANOUT_AFTER_MS = 30_000;
+const DEFAULT_ONCE_LIFETIME_MS = 24 * 60 * 60 * 1_000;
 
 export class WatchArgsError extends Error {
   constructor(message: string) {
@@ -124,6 +98,12 @@ export class WatchArgsError extends Error {
 export interface WatchArgs {
   readonly topics: readonly string[];
   readonly flags: CliFlags;
+  readonly client: ClientName | null;
+  readonly once: boolean;
+  readonly wake: boolean;
+  readonly actionableOnly: boolean;
+  readonly allFrames: boolean;
+  readonly wakeKinds: ReadonlySet<WakeKind>;
 }
 
 export interface WatchOptions {
@@ -133,6 +113,12 @@ export interface WatchOptions {
   readonly install?: boolean;
   readonly wsClientFactory?: (opts: WsClientOptions) => WsClient;
   readonly signalSource?: SignalSource;
+  readonly onceLifetimeMs?: number;
+  readonly sessionKey?: string;
+  readonly pid?: number;
+  readonly isPidAlive?: (pid: number) => boolean;
+  readonly inspector?: ParentProcessInspector;
+  readonly antigravityOverrides?: Partial<AntigravityWakeOptions>;
 }
 
 interface JsonlSink {
@@ -147,7 +133,15 @@ export interface SignalSource {
 export function parseWatchArgs(argv: readonly string[]): WatchArgs {
   const { flags, remaining } = parseCliFlags(argv);
   const topics: string[] = [];
-  for (let i = 0; i < remaining.length; i += 1) {
+  const wakeKindsList: WakeKind[] = [];
+  let client: ClientName | null = null;
+  let once = false;
+  let wake = false;
+  let allFrames = false;
+  let explicitActionableOnly: boolean | null = null;
+
+  let i = 0;
+  while (i < remaining.length) {
     const arg = remaining[i]!;
     if (arg === "--topic") {
       const next = remaining[i + 1];
@@ -155,13 +149,80 @@ export function parseWatchArgs(argv: readonly string[]): WatchArgs {
         throw new WatchArgsError("--topic requires a value (e.g. --topic signals.)");
       }
       topics.push(next);
+      i += 2;
+      continue;
+    }
+    if (arg === "--client") {
+      const next = remaining[i + 1];
+      if (typeof next !== "string" || next.length === 0) {
+        throw new WatchArgsError("--client requires a CLI name");
+      }
+      try {
+        client = parseClientName(next, "--client");
+      } catch (err) {
+        throw new WatchArgsError(err instanceof ClientArgError ? err.message : String(err));
+      }
+      i += 2;
+      continue;
+    }
+    if (arg.startsWith("--client=")) {
+      try {
+        client = parseClientName(arg.slice("--client=".length), "--client");
+      } catch (err) {
+        throw new WatchArgsError(err instanceof ClientArgError ? err.message : String(err));
+      }
+      i += 1;
+      continue;
+    }
+    if (arg === "--once") {
+      once = true;
+      i += 1;
+      continue;
+    }
+    if (arg === "--wake") {
+      wake = true;
+      i += 1;
+      continue;
+    }
+    if (arg === "--actionable-only") {
+      explicitActionableOnly = true;
+      allFrames = false;
+      i += 1;
+      continue;
+    }
+    if (arg === "--all-frames") {
+      explicitActionableOnly = false;
+      allFrames = true;
+      i += 1;
+      continue;
+    }
+    if (arg === "--wake-on") {
+      const next = remaining[i + 1];
+      if (typeof next !== "string" || next.length === 0) {
+        throw new WatchArgsError("--wake-on requires a wake kind");
+      }
+      try {
+        wakeKindsList.push(parseWakeKind(next));
+      } catch (err) {
+        throw new WatchArgsError(err instanceof Error ? err.message : String(err));
+      }
+      i += 2;
+      continue;
+    }
+    if (arg.startsWith("--wake-on=")) {
+      try {
+        wakeKindsList.push(parseWakeKind(arg.slice("--wake-on=".length)));
+      } catch (err) {
+        throw new WatchArgsError(err instanceof Error ? err.message : String(err));
+      }
       i += 1;
       continue;
     }
     throw new WatchArgsError(
-      `unknown argument ${JSON.stringify(redactCliArg(arg))} — usage: snapper-mcp watch [--config PATH] [--topic PREFIX]...`,
+      `unknown argument ${JSON.stringify(redactCliArg(arg))} — usage: snapper-mcp watch [--config PATH] [--client CLI] [--actionable-only] [--once] [--topic PREFIX]...`,
     );
   }
+
   const resolved = topics.length === 0 ? [...DEFAULT_TOPICS] : topics;
   for (const topic of resolved) {
     if (!topic.endsWith(".")) {
@@ -170,7 +231,22 @@ export function parseWatchArgs(argv: readonly string[]): WatchArgs {
       );
     }
   }
-  return { topics: resolved, flags };
+  const actionableOnly = explicitActionableOnly ?? (once || client !== null);
+  const wakeKinds =
+    wakeKindsList.length > 0
+      ? new Set<WakeKind>(wakeKindsList)
+      : new Set<WakeKind>(DEFAULT_WAKE_KINDS);
+
+  return {
+    topics: resolved,
+    flags,
+    client,
+    once,
+    wake,
+    actionableOnly,
+    allFrames,
+    wakeKinds,
+  };
 }
 
 function resolveStdout(opt: WatchOptions["stdout"]): JsonlSink {
@@ -188,14 +264,6 @@ function resolveStdout(opt: WatchOptions["stdout"]): JsonlSink {
   let pendingWrite: Promise<void> = Promise.resolve();
   return {
     write: (line) => {
-      /*
-       * The Web Streams writer rejects on a closed/errored stream;
-       * swallow the rejection so a failing operator-supplied sink
-       * cannot crash the watch loop with an unhandled rejection.
-       * The watch run continues to call `write` for subsequent
-       * frames — those will reject identically, leaving the rest
-       * of the lifecycle (reconnect, heartbeat, shutdown) intact.
-       */
       pendingWrite = pendingWrite
         .then(() => writer.write(encoder.encode(line)))
         .catch((): void => undefined);
@@ -274,17 +342,47 @@ async function fetchDelegatePublicId(baseUrl: URL, store: TokenStore): Promise<s
   return delegatePublicId.trim();
 }
 
-function writeFrame(sink: JsonlSink, frame: ServerFrame): void {
-  sink.write(`${JSON.stringify(frame)}\n`);
+function formatOutputLine(
+  args: WatchArgs,
+  frame: ServerFrame,
+  kind: WakeKind | null,
+): string {
+  if (args.client !== null && !args.allFrames) {
+    if (args.client === "copilot") {
+      return `${SNAPPER_COPILOT_ATTENTION_LINE}\n`;
+    }
+    if (args.client === "kimi" && args.once) {
+      return `${SNAPPER_KIMI_ATTENTION_LINE}\n`;
+    }
+    return `${formatClientAttentionLine(kind ?? "ai_review")}\n`;
+  }
+  return `${JSON.stringify(frame)}\n`;
 }
 
-function createFrameForwarder(
-  sink: JsonlSink,
-  delegatePublicId: string | null,
-): FrameForwarder {
-  if (delegatePublicId === null) {
+function createFrameForwarder(params: {
+  readonly sink: JsonlSink;
+  readonly delegatePublicId: string | null;
+  readonly args: WatchArgs;
+  readonly onOnceEmitted: () => void;
+}): FrameForwarder {
+  let onceDone = false;
+
+  const deliverFrame = (frame: ServerFrame): void => {
+    if (onceDone) return;
+    const kind = classifyActionableFrame(frame, params.args.wakeKinds);
+    if (params.args.actionableOnly && kind === null) {
+      return;
+    }
+    params.sink.write(formatOutputLine(params.args, frame, kind));
+    if (params.args.once) {
+      onceDone = true;
+      params.onOnceEmitted();
+    }
+  };
+
+  if (params.delegatePublicId === null) {
     return {
-      onFrame: (frame) => writeFrame(sink, frame),
+      onFrame: (frame) => deliverFrame(frame),
       dispose: () => undefined,
     };
   }
@@ -301,7 +399,7 @@ function createFrameForwarder(
     const createdAtMs = Date.parse(frame.timestamp);
     const deadlineMs = Date.parse(frame.deadline);
     if (!Number.isFinite(createdAtMs) || !Number.isFinite(deadlineMs)) {
-      writeFrame(sink, frame);
+      deliverFrame(frame);
       return;
     }
 
@@ -311,7 +409,7 @@ function createFrameForwarder(
       return;
     }
     if (releaseAtMs <= nowMs) {
-      writeFrame(sink, frame);
+      deliverFrame(frame);
       return;
     }
 
@@ -319,7 +417,7 @@ function createFrameForwarder(
     const timer = setTimeout(() => {
       held.delete(frame.review_public_id);
       if (Date.now() < deadlineMs) {
-        writeFrame(sink, frame);
+        deliverFrame(frame);
       }
     }, releaseAtMs - nowMs);
     timer.unref();
@@ -330,11 +428,11 @@ function createFrameForwarder(
     onFrame: (frame) => {
       if (frame.type === "ai_review.decision_ack") {
         cancelHeld(frame.review_public_id);
-        writeFrame(sink, frame);
+        deliverFrame(frame);
         return;
       }
       if (frame.type !== "ai_review.request") {
-        writeFrame(sink, frame);
+        deliverFrame(frame);
         return;
       }
 
@@ -343,9 +441,9 @@ function createFrameForwarder(
       if (
         typeof selected !== "string" ||
         selected.length === 0 ||
-        selected === delegatePublicId
+        selected === params.delegatePublicId
       ) {
-        writeFrame(sink, frame);
+        deliverFrame(frame);
         return;
       }
       holdForeignRequest(frame);
@@ -357,19 +455,20 @@ function createFrameForwarder(
   };
 }
 
-async function buildWatchSetup(
-  args: WatchArgs,
-  options: WatchOptions,
-  sink: JsonlSink,
-  env: BridgeEnv,
-  logger: Logger,
-): Promise<WatchSetup> {
-  const wsUrl = computeWsUrl(env.baseUrl);
-  const store = new TokenStore({ access: env.accessToken });
+async function buildWatchSetup(params: {
+  readonly args: WatchArgs;
+  readonly options: WatchOptions;
+  readonly sink: JsonlSink;
+  readonly env: BridgeEnv;
+  readonly logger: Logger;
+  readonly onOnceEmitted: () => void;
+}): Promise<WatchSetup> {
+  const wsUrl = computeWsUrl(params.env.baseUrl);
+  const store = new TokenStore({ access: params.env.accessToken });
   let delegatePublicId: string | null = null;
   let filterStatus: string;
   try {
-    delegatePublicId = await fetchDelegatePublicId(env.baseUrl, store);
+    delegatePublicId = await fetchDelegatePublicId(params.env.baseUrl, store);
     filterStatus =
       `INFO ai_review delegate filter enabled: ` +
       `delegate_public_id=${JSON.stringify(delegatePublicId)}`;
@@ -380,77 +479,266 @@ async function buildWatchSetup(
   }
   writeStderr(`[${CLIENT_NAME} watch] ${filterStatus}\n`);
 
-  const forwarder = createFrameForwarder(sink, delegatePublicId);
+  const forwarder = createFrameForwarder({
+    sink: params.sink,
+    delegatePublicId,
+    args: params.args,
+    onOnceEmitted: params.onOnceEmitted,
+  });
   const minter = new EnvelopeMinter();
-  const fetchToken = (): Promise<WsTokenResult> => fetchWsToken(env.baseUrl, store, logger);
+  const fetchToken = (): Promise<WsTokenResult> =>
+    fetchWsToken(params.env.baseUrl, store, params.logger);
   const wsOptions: WsClientOptions = {
     wsUrl,
     tokenStore: store,
     fetchWsToken: fetchToken,
-    topics: args.topics,
+    topics: params.args.topics,
     minter,
-    logger,
+    logger: params.logger,
     onFrame: forwarder.onFrame,
   };
-  const factory = options.wsClientFactory ?? createWsClient;
+  const factory = params.options.wsClientFactory ?? createWsClient;
   const client = factory(wsOptions);
-  return { client, logger, dispose: forwarder.dispose };
+  return { client, logger: params.logger, dispose: forwarder.dispose };
+}
+
+function looksLikeKimiOnceArgv(argv: readonly string[]): boolean {
+  const hasOnce = argv.includes("--once");
+  if (!hasOnce) return false;
+  for (let i = 0; i < argv.length; i += 1) {
+    if (argv[i] === "--client" && argv[i + 1]?.toLowerCase() === "kimi") return true;
+    if (argv[i]?.toLowerCase() === "--client=kimi") return true;
+  }
+  return false;
+}
+
+async function deriveSessionKey(
+  client: ClientName,
+  source: NodeJS.ProcessEnv,
+  options: WatchOptions,
+): Promise<{ readonly key: string; readonly parentPid: number; readonly parentStartToken: string }> {
+  if (typeof options.sessionKey === "string" && options.sessionKey.length > 0) {
+    return { key: options.sessionKey, parentPid: process.ppid, parentStartToken: "0" };
+  }
+  if (client === "copilot") {
+    const copilotId = source["COPILOT_AGENT_SESSION_ID"];
+    if (typeof copilotId === "string" && copilotId.trim().length > 0) {
+      return { key: copilotId.trim(), parentPid: process.ppid, parentStartToken: "0" };
+    }
+  }
+  const inspector = options.inspector ?? (() => inspectParentProcess());
+  const parent = await inspector();
+  if (parent !== null) {
+    return {
+      key: `${parent.pid}:${parent.startToken}`,
+      parentPid: parent.pid,
+      parentStartToken: parent.startToken,
+    };
+  }
+  return {
+    key: `ppid:${process.ppid}`,
+    parentPid: process.ppid,
+    parentStartToken: "0",
+  };
 }
 
 export async function watchMain(options: WatchOptions = {}): Promise<void> {
   const argv = options.argv ?? process.argv.slice(3);
   const source = options.source ?? process.env;
   const logger = createLogger(`${CLIENT_NAME} watch`, source);
+  const sink = resolveStdout(options.stdout);
+  const isKimiOnce = looksLikeKimiOnceArgv(argv);
+
   let args: WatchArgs;
   try {
     args = parseWatchArgs(argv);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     writeStderr(`[${CLIENT_NAME} watch] ${message}\n`);
+    if (isKimiOnce) {
+      sink.write(`${KIMI_OUTCOME_LINES[KIMI_EXIT_FAILED]}\n`);
+      process.exit(KIMI_EXIT_FAILED);
+      return;
+    }
     process.exit(1);
     return;
   }
-  const sink = resolveStdout(options.stdout);
 
-  let setup: WatchSetup;
+  const stateDir = resolveStateDir(source);
+  const isPidAlive = options.isPidAlive ?? defaultIsPidAlive;
+  const selfPid = options.pid ?? process.pid;
+
+  let env: BridgeEnv;
+  const resolvedConfigPath =
+    args.flags.configPath ?? (args.client !== null ? defaultConfigFilePath(source) : null);
   try {
     const configFile: ConfigFile | null =
-      args.flags.configPath === null ? null : await loadConfigFile(args.flags.configPath, logger);
-    const env = resolveBridgeEnv(source, args.flags, configFile, logger);
-    setup = await buildWatchSetup(args, options, sink, env, logger);
+      resolvedConfigPath === null ? null : await loadConfigFile(resolvedConfigPath, logger);
+    env = resolveBridgeEnv(
+      source,
+      { ...args.flags, configPath: resolvedConfigPath },
+      configFile,
+      logger,
+    );
   } catch (err) {
     if (!(err instanceof EnvValidationError)) throw err;
     writeStderr(`[${CLIENT_NAME} watch] ${err.message}\n`);
+    if (args.client === "kimi" && args.once) {
+      sink.write(`${KIMI_OUTCOME_LINES[KIMI_EXIT_FAILED]}\n`);
+      process.exit(KIMI_EXIT_FAILED);
+      return;
+    }
     process.exit(1);
     return;
   }
-  const { client, dispose } = setup;
+
+  if (args.client === "antigravity" && args.wake) {
+    const code = await runAntigravityWakeCommand({
+      env,
+      configPath: resolvedConfigPath ?? defaultConfigFilePath(source),
+      stateDir,
+      source,
+      logger,
+      inspector: options.inspector,
+      isPidAlive,
+      wsClientFactory: options.wsClientFactory,
+      ...options.antigravityOverrides,
+    });
+    if (code !== 0) {
+      process.exit(code);
+    }
+    return;
+  }
+
+  let sessionLock: SessionLockHandle | null = null;
+  let kimiParentInfo: { readonly parentPid: number; readonly parentStartToken: string } | null = null;
+
+  if (args.client !== null) {
+    const pref = await readWakePreference(stateDir, args.client);
+    if (pref === "off") {
+      if (args.client === "kimi" && args.once) {
+        sink.write(`${KIMI_OUTCOME_LINES[KIMI_EXIT_DISABLED]}\n`);
+      }
+      process.exit(KIMI_EXIT_DISABLED);
+      return;
+    }
+
+    const sessionInfo = await deriveSessionKey(args.client, source, options);
+    sessionLock = await acquireSessionLock({
+      stateDir,
+      client: args.client,
+      sessionKey: sessionInfo.key,
+      pid: selfPid,
+      isPidAlive,
+    });
+    if (!sessionLock.acquired) {
+      if (args.client === "kimi" && args.once) {
+        sink.write(`${KIMI_OUTCOME_LINES[KIMI_EXIT_DUPLICATE]}\n`);
+      }
+      process.exit(KIMI_EXIT_DUPLICATE);
+      return;
+    }
+
+    if (args.client === "kimi" && args.once) {
+      kimiParentInfo = {
+        parentPid: sessionInfo.parentPid,
+        parentStartToken: sessionInfo.parentStartToken,
+      };
+      await claimKimiWatcherStart({
+        stateDir,
+        parentPid: sessionInfo.parentPid,
+        parentStartToken: sessionInfo.parentStartToken,
+        watcherPid: selfPid,
+      });
+    }
+  }
+
+  let activeClient: WsClient | null = null;
+  let onceCompleted = false;
+  let onceExpired = false;
+  let expiryTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const setup = await buildWatchSetup({
+    args,
+    options,
+    sink,
+    env,
+    logger,
+    onOnceEmitted: () => {
+      onceCompleted = true;
+      if (activeClient !== null) {
+        void activeClient.close();
+      }
+    },
+  });
+  activeClient = setup.client;
+  if (onceCompleted) {
+    void activeClient.close();
+  }
+
+  if (args.once && !onceCompleted) {
+    const lifetimeMs = options.onceLifetimeMs ?? DEFAULT_ONCE_LIFETIME_MS;
+    expiryTimer = setTimeout(() => {
+      if (!onceCompleted) {
+        onceExpired = true;
+        void setup.client.close();
+      }
+    }, lifetimeMs);
+    if (lifetimeMs >= 60_000) {
+      expiryTimer.unref();
+    }
+  }
 
   const signalSource = resolveSignalSource(options.signalSource);
   const shouldInstall = options.install ?? true;
 
   logger.info(`subscribing to topics: ${args.topics.join(", ")}`);
-  let exitCode: number | null;
+  let exitCode: number | null = 1;
   try {
-    exitCode = await runWatchSession(client, logger, signalSource, shouldInstall);
+    exitCode = await runWatchSession(setup.client, logger, signalSource, shouldInstall);
   } finally {
-    dispose();
+    if (expiryTimer !== null) clearTimeout(expiryTimer);
+    setup.dispose();
+    if (kimiParentInfo !== null) {
+      const latchReason = onceExpired
+        ? "expired"
+        : exitCode !== null
+          ? "failed"
+          : null;
+      await recordKimiWatcherFinish({
+        stateDir,
+        parentPid: kimiParentInfo.parentPid,
+        parentStartToken: kimiParentInfo.parentStartToken,
+        watcherPid: selfPid,
+        latchReason,
+      }).catch(() => undefined);
+    }
+    if (sessionLock !== null) {
+      await sessionLock.release();
+    }
+  }
+
+  if (onceCompleted) {
+    process.exit(KIMI_EXIT_ATTENTION);
+    return;
+  }
+  if (onceExpired) {
+    if (args.client === "kimi") {
+      sink.write(`${KIMI_OUTCOME_LINES[KIMI_EXIT_EXPIRED]}\n`);
+    }
+    process.exit(KIMI_EXIT_EXPIRED);
+    return;
   }
   if (exitCode !== null) {
+    if (args.client === "kimi" && args.once) {
+      sink.write(`${KIMI_OUTCOME_LINES[KIMI_EXIT_FAILED]}\n`);
+      process.exit(KIMI_EXIT_FAILED);
+      return;
+    }
     process.exit(exitCode);
   }
 }
 
-/**
- * Run the WS client to completion, draining cleanly on signal,
- * exit-coding bad-error rejections.
- *
- * `process.exit()` does NOT run `finally` blocks before terminating,
- * so signal-handler uninstall MUST complete before any exit call.
- * This helper captures the desired exit code, lets the `finally`
- * uninstall handlers, and returns the code to the caller — which
- * is the only place allowed to invoke `process.exit`.
- */
 async function runWatchSession(
   client: WsClient,
   logger: Logger,

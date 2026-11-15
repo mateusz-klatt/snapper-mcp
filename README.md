@@ -93,6 +93,47 @@ macOS, `%APPDATA%\Claude\claude_desktop_config.json` on Windows):
 Restart Claude Desktop; the Snapper server shows up in the MCP Servers
 settings panel.
 
+### Option 2b — Multi-CLI installer (`snapper-mcp integrate`)
+
+Configure MCP tool access and interactive-only session wake across any of the
+supported coding CLIs (`claude`, `codex`, `copilot`, `antigravity`, `kimi`,
+`grok`, `cursor`, or `all`):
+
+```bash
+npm install -g @mateusz-klatt/snapper-mcp
+
+SNAPPER_BASE_URL="https://snapper.example.com/api/mcp" \
+SNAPPER_ACCESS_TOKEN="<delegate-jwt>" \
+  snapper-mcp integrate all
+
+# Headless / container MCP wiring without interactive wake hooks:
+snapper-mcp integrate all --no-wake --config /path/to/config.json
+
+# Inspect configured CLIs and credential validity offline:
+snapper-mcp doctor
+
+# Cleanly remove Snapper entries and restore prior user config files:
+snapper-mcp integrate --remove all
+```
+
+Credentials are stored in a mode-`0600` JSON file inside the user's private
+`snapper-mcp` state directory (or read from `--config PATH`) and are never
+embedded into CLI hook commands or process arguments. On Windows, POSIX mode
+bits do not enforce NTFS ACLs; keep the credential file under the default
+`%APPDATA%\snapper-mcp\config.json` path inside the user profile or verify
+NTFS read permissions are restricted to the current user when passing a custom
+`--config PATH`.
+
+For `claude`, `snapper-mcp integrate claude` writes a local plugin bundle under
+the `snapper-mcp` state directory and registers `snapper@snapper-local` in
+Claude Code's user configuration (`~/.claude/settings.json` and
+`~/.claude/plugins/`). All client-facing `snapper-mcp watch --client <cli>`
+modes default to `--actionable-only` and emit fixed, content-free attention
+notices rather than raw backend frame payloads unless `--all-frames` is
+explicitly passed. Interactive wake hooks verify terminal attachment and client
+argument grammar before arming so non-interactive print runs (`-p`, `--print`,
+`codex exec`) never emit extra lines or continuation turns.
+
 ### Option 3 — Direct CLI / custom hosts
 
 ```bash

@@ -1,6 +1,6 @@
 {
   "name": "snapper-mcp",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "description": "Connects Claude Code / Claude Desktop to a Snapper trading backend via the /api/mcp endpoint. Ships a watch subcommand that streams live signal + order events as JSONL, armed per session by the bundled `wake` skill and sharing the same long-lived AI delegate token as the proxy MCP server.",
   "author": {
     "name": "Mateusz Klatt",
@@ -38,7 +38,7 @@
       "command": "npx",
       "args": [
         "-y",
-        "@mateusz-klatt/snapper-mcp@0.15.0"
+        "@mateusz-klatt/snapper-mcp@0.16.0"
       ],
       "env": {
         "SNAPPER_BASE_URL": "${user_config.SNAPPER_BASE_URL}",
@@ -49,7 +49,7 @@
   "monitors": [
     {
       "name": "snapper-watch",
-      "command": "npx -y @mateusz-klatt/snapper-mcp@0.15.0 watch --config=\"${CLAUDE_PLUGIN_DATA}/env.json\"",
+      "command": "npx -y @mateusz-klatt/snapper-mcp@0.16.0 watch --actionable-only --config=\"${CLAUDE_PLUGIN_DATA}/env.json\"",
       "description": "Live Snapper signal + order events streamed as JSONL",
       "when": "on-skill-invoke:snapper-mcp:wake"
     }
