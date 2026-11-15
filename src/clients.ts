@@ -49,18 +49,28 @@ export function parseClientSelection(
       `client target is required — expected one of: ${SUPPORTED_CLIENTS.join(", ")}, all`,
     );
   }
+  let sawAll = false;
   const seen = new Set<ClientName>();
   const out: ClientName[] = [];
   for (const raw of items) {
     const normalized = raw.trim().toLowerCase();
     if (normalized === "all") {
-      return SUPPORTED_CLIENTS;
+      sawAll = true;
+      continue;
     }
     const parsed = parseClientName(normalized, "client");
     if (!seen.has(parsed)) {
       seen.add(parsed);
       out.push(parsed);
     }
+  }
+  if (sawAll) {
+    if (out.length > 0) {
+      throw new ClientArgError(
+        "'all' cannot be combined with other client targets",
+      );
+    }
+    return SUPPORTED_CLIENTS;
   }
   return out;
 }

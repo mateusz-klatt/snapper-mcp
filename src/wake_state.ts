@@ -113,8 +113,11 @@ export async function recordCodexSession(params: {
     name: "codex-wake",
     initial: initialCodexState,
     mutate: (current) => {
-      const changedThread = current.threadId !== params.threadId;
-      const clearRes = params.consumeReservation || changedThread;
+      const changedSession =
+        current.threadId !== params.threadId ||
+        current.codexPid !== params.codexPid ||
+        current.codexStartToken !== params.codexStartToken;
+      const clearRes = params.consumeReservation || changedSession;
       return {
         next: {
           codexPid: params.codexPid,

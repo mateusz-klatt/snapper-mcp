@@ -7,6 +7,8 @@
  * hook never interrupts a CLI.
  */
 
+import { accessSync, constants as fsConstants, realpathSync } from "node:fs";
+import path from "node:path";
 import type { Readable, Writable } from "node:stream";
 
 import { SNAPPER_WAKE_PROMPT } from "./actionable.js";
@@ -76,16 +78,90 @@ export function formatCliCommand(
   const all = [invocation.command, ...(invocation.prefixArgs ?? []), ...subArgs];
   if (platform === "win32") {
     return all
-      .map((part) => (/[\s"&|<>^()]/.test(part) ? `"${part.replaceAll('"', '\\"')}"` : part))
+      .map((part) => {
+        const escaped = part.replaceAll("%", "%%");
+        return /[\s"&|<>^()%]/.test(escaped)
+          ? `"${escaped.replaceAll('"', '\\"')}"`
+          : escaped;
+      })
       .join(" ");
   }
   return all.map((part) => shellQuotePosix(part)).join(" ");
 }
 
-function defaultInvocation(): HookInvocationSpec {
+function safeRealpath(candidate: string): string | null {
+  try {
+    return realpathSync(candidate);
+  } catch {
+    return null;
+  }
+}
+
+export function findExecutableOnPath(
+  name: string,
+  source: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): string | null {
+  const rawPath = source["PATH"] ?? source["Path"] ?? "";
+  if (rawPath.length === 0) return null;
+  const sep = platform === "win32" ? ";" : ":";
+  const exts =
+    platform === "win32"
+      ? (name.includes(".") ? [""] : [".exe", ".cmd", ".bat", ""])
+      : [""];
+  const mode = platform === "win32" ? fsConstants.F_OK : fsConstants.X_OK;
+  for (const dir of rawPath.split(sep)) {
+    const trimmed = dir.trim();
+    if (trimmed.length === 0 || !path.isAbsolute(trimmed)) continue;
+    for (const ext of exts) {
+      const candidate = path.join(trimmed, `${name}${ext}`);
+      try {
+        accessSync(candidate, mode);
+        return candidate;
+      } catch {
+        // Continue scanning PATH entries.
+      }
+    }
+  }
+  return null;
+}
+
+function resolveStableNodeCommand(
+  source: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+): string {
+  const execReal = safeRealpath(process.execPath);
+  const pathNode = findExecutableOnPath("node", source, platform);
+  if (pathNode !== null && execReal !== null && safeRealpath(pathNode) === execReal) {
+    return pathNode;
+  }
+  return process.execPath;
+}
+
+export function resolveDefaultInvocation(
+  source: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+  options: { readonly rejectEphemeralNpx?: boolean } = {},
+): HookInvocationSpec {
   const scriptPath = process.argv[1];
   if (typeof scriptPath === "string" && scriptPath.length > 0) {
-    return { command: process.execPath, prefixArgs: [scriptPath] };
+    if (
+      options.rejectEphemeralNpx === true &&
+      /[\\/](?:_npx|npm-cache[\\/]_npx)[\\/]/.test(scriptPath)
+    ) {
+      throw new Error(
+        "refusing to write ephemeral npx cache path into persistent CLI configs; install @mateusz-klatt/snapper-mcp globally or pass --bin PATH",
+      );
+    }
+    const pathBin = findExecutableOnPath("snapper-mcp", source, platform);
+    const scriptReal = safeRealpath(scriptPath);
+    if (pathBin !== null && scriptReal !== null && safeRealpath(pathBin) === scriptReal) {
+      return { command: pathBin };
+    }
+    return {
+      command: resolveStableNodeCommand(source, platform),
+      prefixArgs: [scriptPath],
+    };
   }
   return { command: "snapper-mcp" };
 }
@@ -101,33 +177,37 @@ export function parseHookArgs(
   let eventRaw: string | null = null;
   let binOverride: string | null = null;
 
-  for (let i = 0; i < remaining.length; i += 1) {
+  let i = 0;
+  while (i < remaining.length) {
     const arg = remaining[i]!;
     if (arg === "--client") {
       clientRaw = remaining[i + 1] ?? null;
-      i += 1;
+      i += 2;
       continue;
     }
     if (arg.startsWith("--client=")) {
       clientRaw = arg.slice("--client=".length);
+      i += 1;
       continue;
     }
     if (arg === "--event") {
       eventRaw = remaining[i + 1] ?? null;
-      i += 1;
+      i += 2;
       continue;
     }
     if (arg.startsWith("--event=")) {
       eventRaw = arg.slice("--event=".length);
+      i += 1;
       continue;
     }
     if (arg === "--bin") {
       binOverride = remaining[i + 1] ?? null;
-      i += 1;
+      i += 2;
       continue;
     }
     if (arg.startsWith("--bin=")) {
       binOverride = arg.slice("--bin=".length);
+      i += 1;
       continue;
     }
     throw new Error(`unknown hook argument ${JSON.stringify(arg)}`);
@@ -146,7 +226,7 @@ export function parseHookArgs(
     invocationOverride ??
     (binOverride !== null && binOverride.trim().length > 0
       ? { command: binOverride.trim() }
-      : defaultInvocation());
+      : resolveDefaultInvocation(source, platform));
 
   return {
     client,
@@ -444,14 +524,14 @@ async function handleCodexHook(params: {
   readonly payload: Record<string, unknown>;
   readonly stateDir: string;
   readonly inspector: ParentProcessInspector;
-}): Promise<string | null> {
+}): Promise<void> {
   const sessionId = extractSessionId(params.payload);
   if (sessionId === null || !UUID_REGEX.test(sessionId)) {
-    return null;
+    return;
   }
   const check = await checkInteractiveSession("codex", params.inspector);
   if (!check.interactive || check.parent === null) {
-    return null;
+    return;
   }
   if (
     params.event === "SessionStart" ||
@@ -466,10 +546,9 @@ async function handleCodexHook(params: {
       consumeReservation: params.event === "UserPromptSubmit",
     });
   }
-  return null;
 }
 
-export async function hookMain(options: HookOptions = {}): Promise<number> {
+export async function hookMain(options: HookOptions = {}): Promise<void> {
   const argv = options.argv ?? process.argv.slice(3);
   const source = options.source ?? process.env;
   const platform = options.platform ?? process.platform;
@@ -528,7 +607,7 @@ export async function hookMain(options: HookOptions = {}): Promise<number> {
         });
         break;
       case "codex":
-        output = await handleCodexHook({
+        await handleCodexHook({
           event: parsed.event,
           payload,
           stateDir,
@@ -537,15 +616,13 @@ export async function hookMain(options: HookOptions = {}): Promise<number> {
         break;
       case "claude":
       case "copilot":
-        output = null;
         break;
     }
 
     if (output !== null && options.stdout !== undefined) {
       options.stdout.write(output);
     }
-    return 0;
   } catch {
-    return 0;
+    // Hooks always fail open with zero blocking output.
   }
 }

@@ -12,6 +12,7 @@ import type { Writable } from "node:stream";
 import {
   classifyActionableFrame,
   DEFAULT_WAKE_KINDS,
+  formatClientAttentionLine,
   KIMI_EXIT_ATTENTION,
   KIMI_EXIT_DISABLED,
   KIMI_EXIT_DUPLICATE,
@@ -101,6 +102,7 @@ export interface WatchArgs {
   readonly once: boolean;
   readonly wake: boolean;
   readonly actionableOnly: boolean;
+  readonly allFrames: boolean;
   readonly wakeKinds: ReadonlySet<WakeKind>;
 }
 
@@ -135,9 +137,11 @@ export function parseWatchArgs(argv: readonly string[]): WatchArgs {
   let client: ClientName | null = null;
   let once = false;
   let wake = false;
+  let allFrames = false;
   let explicitActionableOnly: boolean | null = null;
 
-  for (let i = 0; i < remaining.length; i += 1) {
+  let i = 0;
+  while (i < remaining.length) {
     const arg = remaining[i]!;
     if (arg === "--topic") {
       const next = remaining[i + 1];
@@ -145,7 +149,7 @@ export function parseWatchArgs(argv: readonly string[]): WatchArgs {
         throw new WatchArgsError("--topic requires a value (e.g. --topic signals.)");
       }
       topics.push(next);
-      i += 1;
+      i += 2;
       continue;
     }
     if (arg === "--client") {
@@ -158,7 +162,7 @@ export function parseWatchArgs(argv: readonly string[]): WatchArgs {
       } catch (err) {
         throw new WatchArgsError(err instanceof ClientArgError ? err.message : String(err));
       }
-      i += 1;
+      i += 2;
       continue;
     }
     if (arg.startsWith("--client=")) {
@@ -167,22 +171,29 @@ export function parseWatchArgs(argv: readonly string[]): WatchArgs {
       } catch (err) {
         throw new WatchArgsError(err instanceof ClientArgError ? err.message : String(err));
       }
+      i += 1;
       continue;
     }
     if (arg === "--once") {
       once = true;
+      i += 1;
       continue;
     }
     if (arg === "--wake") {
       wake = true;
+      i += 1;
       continue;
     }
     if (arg === "--actionable-only") {
       explicitActionableOnly = true;
+      allFrames = false;
+      i += 1;
       continue;
     }
     if (arg === "--all-frames") {
       explicitActionableOnly = false;
+      allFrames = true;
+      i += 1;
       continue;
     }
     if (arg === "--wake-on") {
@@ -195,7 +206,7 @@ export function parseWatchArgs(argv: readonly string[]): WatchArgs {
       } catch (err) {
         throw new WatchArgsError(err instanceof Error ? err.message : String(err));
       }
-      i += 1;
+      i += 2;
       continue;
     }
     if (arg.startsWith("--wake-on=")) {
@@ -204,6 +215,7 @@ export function parseWatchArgs(argv: readonly string[]): WatchArgs {
       } catch (err) {
         throw new WatchArgsError(err instanceof Error ? err.message : String(err));
       }
+      i += 1;
       continue;
     }
     throw new WatchArgsError(
@@ -219,8 +231,7 @@ export function parseWatchArgs(argv: readonly string[]): WatchArgs {
       );
     }
   }
-  const actionableOnly =
-    explicitActionableOnly ?? (once || client === "copilot" || client === "kimi");
+  const actionableOnly = explicitActionableOnly ?? (once || client !== null);
   const wakeKinds =
     wakeKindsList.length > 0
       ? new Set<WakeKind>(wakeKindsList)
@@ -233,6 +244,7 @@ export function parseWatchArgs(argv: readonly string[]): WatchArgs {
     once,
     wake,
     actionableOnly,
+    allFrames,
     wakeKinds,
   };
 }
@@ -330,12 +342,19 @@ async function fetchDelegatePublicId(baseUrl: URL, store: TokenStore): Promise<s
   return delegatePublicId.trim();
 }
 
-function formatOutputLine(args: WatchArgs, frame: ServerFrame): string {
-  if (args.client === "copilot") {
-    return `${SNAPPER_COPILOT_ATTENTION_LINE}\n`;
-  }
-  if (args.client === "kimi" && args.once) {
-    return `${SNAPPER_KIMI_ATTENTION_LINE}\n`;
+function formatOutputLine(
+  args: WatchArgs,
+  frame: ServerFrame,
+  kind: WakeKind | null,
+): string {
+  if (args.client !== null && !args.allFrames) {
+    if (args.client === "copilot") {
+      return `${SNAPPER_COPILOT_ATTENTION_LINE}\n`;
+    }
+    if (args.client === "kimi" && args.once) {
+      return `${SNAPPER_KIMI_ATTENTION_LINE}\n`;
+    }
+    return `${formatClientAttentionLine(kind ?? "ai_review")}\n`;
   }
   return `${JSON.stringify(frame)}\n`;
 }
@@ -350,11 +369,11 @@ function createFrameForwarder(params: {
 
   const deliverFrame = (frame: ServerFrame): void => {
     if (onceDone) return;
-    if (params.args.actionableOnly) {
-      const kind = classifyActionableFrame(frame, params.args.wakeKinds);
-      if (kind === null) return;
+    const kind = classifyActionableFrame(frame, params.args.wakeKinds);
+    if (params.args.actionableOnly && kind === null) {
+      return;
     }
-    params.sink.write(formatOutputLine(params.args, frame));
+    params.sink.write(formatOutputLine(params.args, frame, kind));
     if (params.args.once) {
       onceDone = true;
       params.onOnceEmitted();

@@ -12,12 +12,21 @@ import { renderCopilotExtensionEntry } from "../src/copilot_extension.js";
 import { doctorMain, parseDoctorArgs } from "../src/doctor.js";
 import type { BridgeEnv } from "../src/env.js";
 import { hookMain, parseHookArgs } from "../src/hook.js";
-import { integrateMain, parseIntegrateArgs } from "../src/integrate.js";
+import {
+  CLAUDE_MARKETPLACE_NAME,
+  CLAUDE_PLUGIN_KEY,
+  integrateMain,
+  isSnapperOwnedHookTree,
+  parseIntegrateArgs,
+  stripManagedSkillText,
+  tokenizeHookCommandString,
+} from "../src/integrate.js";
 import {
   agyMode,
   cursorMode,
   grokMode,
   inspectDarwinProcess,
+  inspectLinuxProcess,
   inspectParentProcess,
   inspectWin32Process,
   kimiMode,
@@ -29,6 +38,7 @@ import {
   acquireSessionLock,
   assertNotSymlinkOrSpecial,
   defaultIsPidAlive,
+  ensureParentDirForFile,
   loadManifest,
   mutateLockedJsonFile,
   readRuntimeJsonFile,
@@ -41,6 +51,7 @@ import {
   writeWakePreference,
 } from "../src/state_dir.js";
 import {
+  extractTomlSnapperInvocation,
   inspectCodexSnapperBlock,
   inspectGrokSnapperTable,
   inspectKimiHooksBlock,
@@ -65,6 +76,8 @@ import {
   AGY_HELPER_ENV,
   createActionableFilter,
   probeCodexThreadIdleViaProxy,
+  queueCodexWakeMessage,
+  resolveSubprocessTarget,
   runAntigravityWakeCommand,
   startCodexWakeWorker,
   startCursorWakeWorker,
@@ -179,6 +192,14 @@ describe("state_dir & toml_edit edge cases", () => {
     await symlink(targetFile, symPath);
     await expect(assertNotSymlinkOrSpecial(symPath)).rejects.toThrow(UnsafeFileTargetError);
     await expect(assertNotSymlinkOrSpecial(dir, false)).rejects.toThrow(UnsafeFileTargetError);
+    const symDir = path.join(dir, "sym-dir");
+    await symlink(dir, symDir, "dir");
+    await expect(
+      ensureParentDirForFile(path.join(symDir, "child.txt")),
+    ).rejects.toThrow(UnsafeFileTargetError);
+    await expect(
+      ensureParentDirForFile(path.join(targetFile, "child.txt")),
+    ).rejects.toThrow(UnsafeFileTargetError);
 
     const locksDir = path.join(dir, "locks");
     await mkdir(locksDir, { recursive: true });
@@ -198,6 +219,15 @@ describe("state_dir & toml_edit edge cases", () => {
       isPidAlive: (pid) => pid === process.pid,
     });
     expect(recoveredLock.acquired).toBe(true);
+    const contendedLock = await acquireSessionLock({
+      stateDir: dir,
+      client: "kimi",
+      sessionKey: "s-corrupt",
+      pid: process.pid,
+      isPidAlive: () => true,
+    });
+    expect(contendedLock.acquired).toBe(false);
+    await contendedLock.release();
     await recoveredLock.release();
 
     const runtimeDir = path.join(dir, "runtime");
@@ -211,6 +241,25 @@ describe("state_dir & toml_edit edge cases", () => {
       mutate: (cur) => ({ next: { n: cur.n + 1 }, result: cur.n + 1 }),
     });
     expect(val).toBe(2);
+
+    await writeFile(
+      path.join(runtimeDir, "expired.mutex"),
+      JSON.stringify({
+        pid: process.pid,
+        token: "old-tok",
+        sessionKey: "expired",
+        createdAtMs: Date.now() - 10_000,
+      }),
+      "utf8",
+    );
+    const expiredVal = await mutateLockedJsonFile({
+      stateDir: dir,
+      name: "expired",
+      isPidAlive: () => true,
+      initial: () => ({ n: 10 }),
+      mutate: (cur) => ({ next: { n: cur.n + 5 }, result: cur.n + 5 }),
+    });
+    expect(expiredVal).toBe(15);
 
     await writeFile(path.join(runtimeDir, "bad-rt.json"), "{corrupt", "utf8");
     expect(await readRuntimeJsonFile(dir, "bad-rt", () => ({ ok: true }))).toEqual({
@@ -327,6 +376,24 @@ describe("state_dir & toml_edit edge cases", () => {
     expect(strippedInline).toContain("other = 1");
     expect(strippedInline).not.toContain("snapper");
     expect(removeGrokSnapperTable('mcp_servers.snapper = { command = "old" }\n')).toBe("");
+    expect(
+      removeGrokSnapperTable(
+        'top = 1\n\n\n[mcp_servers.snapper]\ncommand = "x"\n\n[mcp_servers.other]\ncommand = "y"\n',
+      ),
+    ).toContain("[mcp_servers.other]");
+    expect(
+      removeKimiHooksBlock(
+        '[[hooks]]\nevent = "SessionStart"\ncommand = "snapper-mcp hook --client kimi --config /c"\ntimeout = 5\n',
+      ),
+    ).toBe("");
+    expect(extractTomlSnapperInvocation("bad = [")).toBeNull();
+    expect(extractTomlSnapperInvocation("a = 1")).toBeNull();
+    expect(extractTomlSnapperInvocation("[mcp_servers]\nsnapper = 1\n")).toBeNull();
+    expect(extractTomlSnapperInvocation('[mcp_servers.snapper]\ncommand = ""\n')).toBeNull();
+    expect(extractTomlSnapperInvocation('[mcp_servers.snapper]\ncommand = "bin"\n')).toEqual({
+      command: "bin",
+      args: [],
+    });
   });
 });
 
@@ -360,6 +427,7 @@ describe("interactive, hook, integrate, and doctor remaining branches", () => {
     expect(grokMode(["grok", "-m"])).toBe("unknown");
     expect(grokMode(["grok", "-z"])).toBe("unknown");
     expect(grokMode(["grok", "--resume", "s1"])).toBe("input");
+    expect(grokMode(["grok", "--model", "grok-4"])).toBe("input");
     expect(grokMode(["grok", "--model"])).toBe("unknown");
     expect(grokMode(["grok", "--bad"])).toBe("unknown");
     expect(grokMode(["grok", "one", "two"])).toBe("unknown");
@@ -367,12 +435,14 @@ describe("interactive, hook, integrate, and doctor remaining branches", () => {
     expect(kimiMode(["kimi-code", "", ""])).toBe("input");
     expect(kimiMode(["kimi", "--", "sub"])).toBe("command");
     expect(kimiMode(["kimi", "--"])).toBe("input");
+    expect(kimiMode(["kimi", "-ch"])).toBe("input");
     expect(kimiMode(["kimi", "-mval"])).toBe("input");
     expect(kimiMode(["kimi", "-m"])).toBe("unknown");
     expect(kimiMode(["kimi", "-S", "s1"])).toBe("input");
     expect(kimiMode(["kimi", "-S"])).toBe("input");
     expect(kimiMode(["kimi", "-z"])).toBe("unknown");
     expect(kimiMode(["kimi", "--session", "s1"])).toBe("input");
+    expect(kimiMode(["kimi", "--model", "k2"])).toBe("input");
     expect(kimiMode(["kimi", "--model"])).toBe("unknown");
     expect(kimiMode(["kimi", "extra-positional"])).toBe("unknown");
 
@@ -380,13 +450,27 @@ describe("interactive, hook, integrate, and doctor remaining branches", () => {
     expect(cursorMode(["cursor-agent", "--print=1"])).toBe("unknown");
     expect(cursorMode(["cursor-agent", "--yolo=1"])).toBe("unknown");
     expect(cursorMode(["cursor-agent", "--model"])).toBe("unknown");
+    expect(cursorMode(["cursor-agent", "--model", "gpt-5"])).toBe("input");
+    expect(cursorMode(["cursor-agent", "--model=gpt-5"])).toBe("input");
     expect(cursorMode(["cursor-agent", "--resume", "r1"])).toBe("input");
+    expect(cursorMode(["cursor-agent", "-H", "hdr"])).toBe("input");
     expect(cursorMode(["cursor-agent", "-Hval"])).toBe("input");
     expect(cursorMode(["cursor-agent", "-H"])).toBe("unknown");
     expect(cursorMode(["cursor-agent", "-w", "dir"])).toBe("input");
     expect(cursorMode(["cursor-agent", "-w"])).toBe("input");
     expect(cursorMode(["cursor-agent", "-z"])).toBe("unknown");
 
+    await inspectDarwinProcess(process.pid);
+    const fakeProcPid = path.join(root, "fake-proc", "42");
+    await mkdir(fakeProcPid, { recursive: true });
+    await writeFile(path.join(fakeProcPid, "cmdline"), "grok\0--yolo\0", "utf8");
+    const statFields = Array.from({ length: 22 }, (_, idx) => (idx === 0 ? "S" : idx === 1 ? "7" : idx === 19 ? "98765" : "0"));
+    await writeFile(path.join(fakeProcPid, "stat"), `42 (grok) ${statFields.join(" ")}\n`, "utf8");
+    const linuxSnap = await inspectLinuxProcess(42, path.join(root, "fake-proc"));
+    expect(linuxSnap?.executableName).toBe("grok");
+    expect(linuxSnap?.ppid).toBe(7);
+    expect(linuxSnap?.startToken).toBe("98765");
+    expect(await inspectLinuxProcess(999, path.join(root, "fake-proc"))).toBeNull();
     expect(await inspectDarwinProcess(123, () => Promise.reject(new Error("ps failed")))).toBeNull();
     expect(await inspectDarwinProcess(123, () => Promise.resolve(""))).toBeNull();
     expect(await inspectWin32Process(123, () => Promise.reject(new Error("pwsh failed")))).toBeNull();
@@ -437,7 +521,7 @@ describe("interactive, hook, integrate, and doctor remaining branches", () => {
         stdin: bigStream,
         stdout: out,
       }),
-    ).toBe(0);
+    ).toBeUndefined();
 
     const convId = "55555555-5555-4555-8555-555555555555";
     await hookMain({
@@ -919,7 +1003,10 @@ describe("interactive, hook, integrate, and doctor remaining branches", () => {
             {
               hooks: [
                 { type: "command", command: "iris" },
-                { type: "command", command: "snapper --client codex" },
+                {
+                  type: "command",
+                  command: "snapper-mcp hook --client codex --event SessionStart --config /c",
+                },
               ],
             },
           ],
@@ -980,6 +1067,248 @@ describe("interactive, hook, integrate, and doctor remaining branches", () => {
         stderr: errSink,
       }),
     ).toBe(1);
+
+    // Tokenize & hook ownership quoting/flag variants + Claude surgical strip + doctor broken hooks/invocations:
+    expect(
+      tokenizeHookCommandString(
+        `& 'C:\\O''Reilly\\bin.exe' "arg \\"q\\"" plain\\'s hook --client=cursor`,
+      ),
+    ).toEqual(["C:\\O'Reilly\\bin.exe", 'arg "q"', "plain's", "hook", "--client=cursor"]);
+    expect(stripManagedSkillText("prefix\n\nBody text\n", "front", "Body text")).toBe("prefix\n");
+    expect(stripManagedSkillText("front\n\nBody text\n", "front", "Body text")).toBeNull();
+
+    // Cursor surgical strip when only snapper hooks exist + userAdded key -> deletes version:
+    const curOnlyHome = path.join(root, "cur-only-home");
+    const curOnlyState = path.join(root, "cur-only-state");
+    await mkdir(curOnlyHome, { recursive: true });
+    const curOnlyEnv: NodeJS.ProcessEnv = {
+      HOME: curOnlyHome,
+      SNAPPER_MCP_HOME: curOnlyState,
+      SNAPPER_BASE_URL: "https://snapper.example.com/api/mcp",
+      SNAPPER_ACCESS_TOKEN: token,
+    };
+    expect(await integrateMain({ argv: ["cursor"], source: curOnlyEnv, platform: "linux" })).toBe(0);
+    const curOnlyHooksPath = path.join(curOnlyHome, ".cursor", "hooks.json");
+    const curOnlyHooks = JSON.parse(await readFile(curOnlyHooksPath, "utf8")) as Record<string, unknown>;
+    curOnlyHooks["userAdded"] = 1;
+    await writeFile(curOnlyHooksPath, JSON.stringify(curOnlyHooks), "utf8");
+    expect(
+      await integrateMain({ argv: ["cursor", "--remove"], source: curOnlyEnv, platform: "linux" }),
+    ).toBe(0);
+    expect(JSON.parse(await readFile(curOnlyHooksPath, "utf8"))).toEqual({ userAdded: 1 });
+    expect(
+      isSnapperOwnedHookTree(
+        {
+          command: "noop",
+          commandWindows:
+            'snapper-mcp.exe hook --client codex --event=SessionStart --config="C:\\cfg.json"',
+        },
+        "codex",
+        "SessionStart",
+      ),
+    ).toBe(true);
+
+    const clHome = path.join(root, "cl-home");
+    const clState = path.join(root, "cl-state");
+    await mkdir(path.join(clHome, ".claude", "plugins"), { recursive: true });
+    await writeFile(
+      path.join(clHome, ".claude", "settings.json"),
+      JSON.stringify({
+        extraKnownMarketplaces: { otherMkt: { source: { source: "directory", path: "/x" } } },
+        enabledPlugins: { "other@otherMkt": true },
+      }),
+      "utf8",
+    );
+    await writeFile(
+      path.join(clHome, ".claude", "plugins", "known_marketplaces.json"),
+      JSON.stringify({
+        otherMkt: { installLocation: "/x" },
+        [CLAUDE_MARKETPLACE_NAME]: { lastUpdated: "2026-05-01T00:00:00.000Z" },
+      }),
+      "utf8",
+    );
+    await writeFile(
+      path.join(clHome, ".claude", "plugins", "installed_plugins.json"),
+      JSON.stringify({
+        version: 2,
+        plugins: {
+          "other@otherMkt": [{ scope: "user", installPath: "/x" }],
+          [CLAUDE_PLUGIN_KEY]: [
+            {
+              scope: "user",
+              installPath: "/old",
+              installedAt: "2026-05-01T00:00:00.000Z",
+              lastUpdated: "2026-05-02T00:00:00.000Z",
+            },
+          ],
+        },
+      }),
+      "utf8",
+    );
+    const clEnv: NodeJS.ProcessEnv = {
+      HOME: clHome,
+      PATH: "",
+      SNAPPER_MCP_HOME: clState,
+      SNAPPER_BASE_URL: "https://snapper.example.com/api/mcp",
+      SNAPPER_ACCESS_TOKEN: token,
+    };
+    expect(
+      await integrateMain({
+        argv: ["all", "--profile", "dev"],
+        source: {
+          ...clEnv,
+          SNAPPER_PROFILE_DEV_BASE_URL: "https://snapper.example.com/api/mcp",
+          SNAPPER_PROFILE_DEV_ACCESS_TOKEN: token,
+        },
+        platform: "linux",
+        invocation: { command: "missing-bare-snapper-mcp" },
+      }),
+    ).toBe(0);
+
+    // Doctor with missing bare command on PATH -> all 7 report command not found:
+    const missingCmdOut = new TextSink();
+    expect(
+      await doctorMain({
+        argv: ["--profile", "dev"],
+        source: clEnv,
+        platform: "linux",
+        stdout: missingCmdOut,
+      }),
+    ).toBe(1);
+    expect(missingCmdOut.text()).toContain("command not found: missing-bare-snapper-mcp");
+
+    // Mutate Claude files so stripClaude* runs with sibling entries AND without sibling entries:
+    for (const rel of [
+      "settings.json",
+      path.join("plugins", "known_marketplaces.json"),
+      path.join("plugins", "installed_plugins.json"),
+    ]) {
+      const p = path.join(clHome, ".claude", rel);
+      const doc = JSON.parse(await readFile(p, "utf8")) as Record<string, unknown>;
+      doc["userTouched"] = 1;
+      await writeFile(p, JSON.stringify(doc), "utf8");
+    }
+    expect(
+      await integrateMain({ argv: ["claude", "--remove"], source: clEnv, platform: "linux" }),
+    ).toBe(0);
+
+    // Second pass with ONLY snapper entries + userTouched so delete extraKnownMarketplaces/enabledPlugins/plugins runs:
+    await rm(path.join(clHome, ".claude"), { recursive: true, force: true });
+    expect(
+      await integrateMain({
+        argv: ["claude"],
+        source: clEnv,
+        platform: "linux",
+        invocation: { command: process.execPath, prefixArgs: [path.join(clHome, "missing-entry.js")] },
+      }),
+    ).toBe(0);
+    // Doctor checks node entrypoint script existence:
+    const missingEntryOut = new TextSink();
+    expect(
+      await doctorMain({
+        argv: ["claude"],
+        source: clEnv,
+        platform: "linux",
+        stdout: missingEntryOut,
+      }),
+    ).toBe(1);
+    expect(missingEntryOut.text()).toContain("entrypoint script not found");
+
+    // Mutate single-entry Claude files with userTouched so stripClaude* deletes empty map keys:
+    for (const rel of [
+      "settings.json",
+      path.join("plugins", "known_marketplaces.json"),
+      path.join("plugins", "installed_plugins.json"),
+    ]) {
+      const p = path.join(clHome, ".claude", rel);
+      const doc = JSON.parse(await readFile(p, "utf8")) as Record<string, unknown>;
+      doc["userTouched"] = 1;
+      await writeFile(p, JSON.stringify(doc), "utf8");
+    }
+    expect(
+      await integrateMain({ argv: ["claude", "--remove"], source: clEnv, platform: "linux" }),
+    ).toBe(0);
+
+    // Non-object validation branches in upsertClaudeSettingsJson / upsertClaudeInstalledPluginsJson:
+    await writeFile(
+      path.join(clHome, ".claude", "settings.json"),
+      '{"extraKnownMarketplaces":[]}',
+      "utf8",
+    );
+    expect(await integrateMain({ argv: ["claude"], source: clEnv, platform: "linux" })).toBe(1);
+    await writeFile(
+      path.join(clHome, ".claude", "settings.json"),
+      '{"enabledPlugins":[]}',
+      "utf8",
+    );
+    expect(await integrateMain({ argv: ["claude"], source: clEnv, platform: "linux" })).toBe(1);
+    await writeFile(path.join(clHome, ".claude", "settings.json"), "{}", "utf8");
+    await writeFile(
+      path.join(clHome, ".claude", "plugins", "installed_plugins.json"),
+      '{"version":1}',
+      "utf8",
+    );
+    expect(await integrateMain({ argv: ["claude"], source: clEnv, platform: "linux" })).toBe(1);
+    await writeFile(
+      path.join(clHome, ".claude", "plugins", "installed_plugins.json"),
+      '{"version":2,"plugins":[]}',
+      "utf8",
+    );
+    expect(await integrateMain({ argv: ["claude"], source: clEnv, platform: "linux" })).toBe(1);
+    await writeFile(
+      path.join(clHome, ".claude", "plugins", "installed_plugins.json"),
+      '{"version":2,"plugins":{}}',
+      "utf8",
+    );
+
+    // Broken hooks JSON & non-object hooks across codex/antigravity/grok/cursor + broken claude registration JSONs:
+    const realStub = path.join(clHome, "real-snapper");
+    await writeFile(realStub, "#!/bin/sh\n", { mode: 0o755 });
+    await chmod(realStub, 0o755);
+    expect(
+      await integrateMain({
+        argv: ["all"],
+        source: clEnv,
+        platform: "linux",
+        invocation: { command: realStub },
+      }),
+    ).toBe(0);
+    await writeFile(path.join(clHome, ".codex", "hooks.json"), "[]", "utf8");
+    await writeFile(path.join(clHome, ".gemini", "config", "hooks.json"), "{bad", "utf8");
+    await writeFile(path.join(clHome, ".grok", "hooks", "snapper.json"), "[]", "utf8");
+    await writeFile(path.join(clHome, ".cursor", "hooks.json"), "{bad", "utf8");
+    await writeFile(path.join(clHome, ".claude", "settings.json"), "[]", "utf8");
+    const brokenHooksOut = new TextSink();
+    expect(
+      await doctorMain({ argv: [], source: clEnv, platform: "linux", stdout: brokenHooksOut }),
+    ).toBe(1);
+
+    await writeFile(path.join(clHome, ".claude", "settings.json"), "{}", "utf8");
+    await writeFile(path.join(clHome, ".claude", "plugins", "known_marketplaces.json"), "{bad", "utf8");
+    expect(await doctorMain({ argv: ["claude"], source: clEnv, platform: "linux" })).toBe(1);
+    await writeFile(path.join(clHome, ".claude", "plugins", "known_marketplaces.json"), "{}", "utf8");
+    await writeFile(path.join(clHome, ".claude", "plugins", "installed_plugins.json"), "[]", "utf8");
+    expect(await doctorMain({ argv: ["claude"], source: clEnv, platform: "linux" })).toBe(1);
+    await writeFile(
+      path.join(clState, "plugins", "claude-marketplace", "plugins", "snapper", ".mcp.json"),
+      "{bad",
+      "utf8",
+    );
+    expect(await doctorMain({ argv: ["claude"], source: clEnv, platform: "linux" })).toBe(1);
+
+    // Command pointing to a directory (!st.isFile()) and node with directory firstArg:
+    await writeFile(
+      path.join(clHome, ".cursor", "mcp.json"),
+      JSON.stringify({ mcpServers: { snapper: { command: clHome, args: [] } } }),
+      "utf8",
+    );
+    expect(await doctorMain({ argv: ["cursor"], source: clEnv, platform: "linux" })).toBe(1);
+    await writeFile(
+      path.join(clHome, ".cursor", "mcp.json"),
+      JSON.stringify({ mcpServers: { snapper: { command: process.execPath, args: [clHome] } } }),
+      "utf8",
+    );
+    expect(await doctorMain({ argv: ["cursor"], source: clEnv, platform: "linux" })).toBe(1);
   });
 });
 
@@ -1128,6 +1457,50 @@ describe.skipIf(!CAN_LISTEN_ON_LOOPBACK)("main proxy wake workers & watch/worker
     (activeCodexOpts as WsClientOptions | null)?.onFrame(makeReviewRequest());
     await new Promise((r) => setTimeout(r, 25));
     await codexWorker.close();
+
+    // Codex worker when wake preference turns off during idleProbe:
+    const codexOffDir = path.join(dir, "codex-off-during-probe");
+    await recordCodexSession({
+      stateDir: codexOffDir,
+      codexPid: 5101,
+      codexStartToken: "s5101",
+      threadId: "88888888-8888-4888-8888-888888888888",
+      consumeReservation: false,
+    });
+    let offCodexOpts: WsClientOptions | null = null;
+    let offProbeHit = false;
+    const codexOffWorker = await startCodexWakeWorker({
+      env: bridgeEnv,
+      stateDir: codexOffDir,
+      logger,
+      isPidAlive: () => true,
+      wsClientFactory: (opts) => {
+        offCodexOpts = opts;
+        let finishRun: (() => void) | null = null;
+        return {
+          run: () =>
+            new Promise<void>((r) => {
+              finishRun = r;
+            }),
+          close: () => {
+            finishRun?.();
+            return Promise.resolve();
+          },
+        };
+      },
+      settleMs: 5,
+      pollMs: 200,
+      idleProbe: async () => {
+        await writeWakePreference(codexOffDir, "codex", "off", "linux");
+        offProbeHit = true;
+        return true;
+      },
+    });
+    await waitFor(() => offCodexOpts !== null, { message: "codex off ws ready" });
+    (offCodexOpts as WsClientOptions | null)?.onFrame(makeReviewRequest());
+    await waitFor(() => offProbeHit, { message: "codex off probe hit" });
+    await new Promise((r) => setTimeout(r, 15));
+    await codexOffWorker.close();
 
     // Antigravity helper retry when sendMessage returns false and wake=off stops helper:
     const convId = "66666666-6666-4666-8666-666666666666";
@@ -1348,6 +1721,22 @@ describe.skipIf(!CAN_LISTEN_ON_LOOPBACK)("main proxy wake workers & watch/worker
     );
     await chmod(badWsProxy, 0o755);
     expect(await probeCodexThreadIdleViaProxy("t-bad", badWsProxy, 2000)).toBe(false);
+    expect(resolveSubprocessTarget("   ", [])).toBeNull();
+    expect(resolveSubprocessTarget("nonexistent-cmd", [], { PATH: "" }, "linux")).toBeNull();
+    expect(
+      await probeCodexThreadIdleViaProxy("t-abort", badWsProxy, 2000, AbortSignal.abort()),
+    ).toBe(false);
+    const liveAbort = new AbortController();
+    const abortProbePromise = probeCodexThreadIdleViaProxy(
+      "t-live-abort",
+      sleeper,
+      5000,
+      liveAbort.signal,
+    );
+    setTimeout(() => liveAbort.abort(), 15);
+    expect(await abortProbePromise).toBe(false);
+    expect(await probeCodexThreadIdleViaProxy("t-none", "missing-codex-bin", 100)).toBe(false);
+    expect(await queueCodexWakeMessage("t-none", "hi", "missing-codex-bin", 100)).toBe(false);
 
     // startCursorWakeWorker run() rejection + fetchWsToken + stateDir write failure:
     vi.stubGlobal("fetch", vi.fn(() => Promise.reject(new Error("net down"))));
@@ -1673,5 +2062,47 @@ describe.skipIf(!CAN_LISTEN_ON_LOOPBACK)("main proxy wake workers & watch/worker
     await new Promise((r) => setTimeout(r, 15));
     parentAlive = false;
     expect(await busyHelper).toBe(0);
+
+    let timerClearOpts: WsClientOptions | null = null;
+    let timerParentAlive = true;
+    const timerClearHelper = runAntigravityWakeCommand({
+      env: bridgeEnv,
+      configPath: "/c",
+      stateDir: agyDir,
+      source: {
+        [AGY_HELPER_ENV]: JSON.stringify({
+          agyPid: 7100,
+          agyStartToken: "s7100",
+          attemptId: "a2",
+          agyExe: "agy",
+        }),
+        ANTIGRAVITY_CONVERSATION_ID: convId,
+        ANTIGRAVITY_CSRF_TOKEN: "csrf",
+        ANTIGRAVITY_LS_ADDRESS: "127.0.0.1:5000",
+      },
+      logger,
+      dialTcp: () => Promise.resolve(true),
+      isPidAlive: () => timerParentAlive,
+      settleMs: 500,
+      pollMs: 10,
+      wsClientFactory: (opts) => {
+        timerClearOpts = opts;
+        let finishTimerWs: (() => void) | null = null;
+        return {
+          run: () =>
+            new Promise<void>((r) => {
+              finishTimerWs = r;
+            }),
+          close: () => {
+            finishTimerWs?.();
+            return Promise.resolve();
+          },
+        };
+      },
+    });
+    await waitFor(() => timerClearOpts !== null, { message: "agy timer ws ready" });
+    (timerClearOpts as WsClientOptions | null)?.onFrame(makeReviewRequest());
+    timerParentAlive = false;
+    expect(await timerClearHelper).toBe(0);
   });
 });

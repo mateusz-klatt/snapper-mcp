@@ -26,6 +26,7 @@ import {
   kimiMode,
   matchesExpectedExecutable,
   parseLinuxStat,
+  splitPosixCommandLine,
   splitWindowsCommandLine,
   walkNearestAncestor,
   type ParentProcessSnapshot,
@@ -113,10 +114,83 @@ describe("interactive argv grammars & process inspection", () => {
   it("classifies Codex invocations", () => {
     expect(codexMode(["codex"])).toBe("input");
     expect(codexMode(["codex", "-m", "gpt-5", "-C", "/repo", "fix bug"])).toBe("input");
+    expect(
+      codexMode([
+        "codex",
+        "-c",
+        "k=v",
+        "-a",
+        "on-request",
+        "-s",
+        "workspace-write",
+        "-p",
+        "default",
+        "-hV",
+        "-mmodel",
+        "--add-dir",
+        "/tmp",
+        "--search",
+        "--oss",
+        "--full-auto",
+        "--no-alt-screen",
+        "--yolo",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--color=never",
+      ]),
+    ).toBe("input");
     expect(codexMode(["codex", "--"])).toBe("input");
+    expect(codexMode(["codex", "--", "single prompt"])).toBe("input");
+    expect(codexMode(["codex", "--", "p1", "p2"])).toBe("unknown");
     expect(codexMode(["codex", "exec", "headless prompt"])).toBe("command");
+    expect(codexMode(["codex", "--image", "a.png", "exec", "x"])).toBe("command");
+    expect(codexMode(["codex", "-i", "a.png", "exec", "x"])).toBe("command");
+    expect(
+      codexMode(["codex", "--enable", "foo", "--disable", "bar", "--local-provider", "ollama", "exec"]),
+    ).toBe("command");
     expect(codexMode(["codex", "mcp"])).toBe("command");
     expect(codexMode(["codex", "-m"])).toBe("unknown");
+    expect(codexMode(["codex", "--image"])).toBe("unknown");
+    expect(codexMode(["codex", "--full-auto=true"])).toBe("unknown");
+    expect(codexMode(["codex", "--future-flag", "exec"])).toBe("unknown");
+    expect(codexMode(["codex", "-z"])).toBe("unknown");
+    expect(codexMode(["codex", "-"])).toBe("unknown");
+    expect(codexMode(["codex", "p1", "p2"])).toBe("unknown");
+  });
+
+  it("splits POSIX command lines with single quotes, double quotes, and escapes", async () => {
+    expect(
+      splitPosixCommandLine(
+        "'/Applications/My Tools/codex' --model \"gpt 5\" \\\"escaped\\\" 'single quoted'",
+      ),
+    ).toEqual([
+      "/Applications/My Tools/codex",
+      "--model",
+      "gpt 5",
+      '"escaped"',
+      "single quoted",
+    ]);
+    expect(splitPosixCommandLine('codex "a\\"b"')).toEqual(["codex", 'a"b']);
+    expect(splitPosixCommandLine("   ")).toBeNull();
+    expect(splitPosixCommandLine("codex \\")).toBeNull();
+    expect(splitPosixCommandLine("codex 'unterminated")).toBeNull();
+    expect(splitPosixCommandLine('codex "unterminated')).toBeNull();
+
+    const quotedDarwin = await inspectDarwinProcess(501, async (_file, args) => {
+      const fmt = args[1];
+      if (fmt === "ppid=") return "100\n";
+      if (fmt === "tty=") return "ttys004\n";
+      if (fmt === "lstart=") return "Sun Nov 15 16:05:00 2026\n";
+      return "'/Applications/My Tools/codex' --image 'my shot.png' exec 'run check'\n";
+    });
+    expect(quotedDarwin?.executableName).toBe("/Applications/My Tools/codex");
+    expect(quotedDarwin?.argv).toEqual([
+      "/Applications/My Tools/codex",
+      "--image",
+      "my shot.png",
+      "exec",
+      "run check",
+    ]);
+    expect(codexMode(quotedDarwin!.argv)).toBe("command");
   });
 
   it("splits Windows command lines strictly and refuses doubled quotes", () => {

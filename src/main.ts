@@ -92,7 +92,8 @@ export function extractProxyWakeArgs(argv: readonly string[]): ProxyWakeFlags {
   let wake: boolean | null = null;
   const filteredArgv: string[] = [];
 
-  for (let i = 0; i < argv.length; i += 1) {
+  let i = 0;
+  while (i < argv.length) {
     const arg = argv[i]!;
     if (arg === "--client") {
       const next = argv[i + 1];
@@ -104,7 +105,7 @@ export function extractProxyWakeArgs(argv: readonly string[]): ProxyWakeFlags {
       } catch (err) {
         throw new EnvValidationError(err instanceof ClientArgError ? err.message : String(err));
       }
-      i += 1;
+      i += 2;
       continue;
     }
     if (arg.startsWith("--client=")) {
@@ -113,17 +114,21 @@ export function extractProxyWakeArgs(argv: readonly string[]): ProxyWakeFlags {
       } catch (err) {
         throw new EnvValidationError(err instanceof ClientArgError ? err.message : String(err));
       }
+      i += 1;
       continue;
     }
     if (arg === "--wake" || arg === "--wake=true") {
       wake = true;
+      i += 1;
       continue;
     }
     if (arg === "--no-wake" || arg === "--wake=false") {
       wake = false;
+      i += 1;
       continue;
     }
     filteredArgv.push(arg);
+    i += 1;
   }
 
   return { client, wake, filteredArgv };

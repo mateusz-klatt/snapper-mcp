@@ -160,8 +160,36 @@ export function readMarkedBlock(existing: string): string | null {
   return span === null ? null : span.inner;
 }
 
+function detectLineEnding(text: string): "\r\n" | "\n" {
+  const crlfCount = countOccurrences(text, "\r\n");
+  if (crlfCount === 0) return "\n";
+  const bareLf = countOccurrences(text.replaceAll("\r\n", ""), "\n");
+  return bareLf === 0 ? "\r\n" : "\n";
+}
+
+function applyLineEnding(lfText: string, eol: "\r\n" | "\n"): string {
+  return eol === "\r\n" ? lfText.replaceAll("\n", "\r\n") : lfText;
+}
+
+function trimLeadingLf(text: string): string {
+  let start = 0;
+  while (start < text.length && text.charCodeAt(start) === 10) {
+    start += 1;
+  }
+  return text.slice(start);
+}
+
+function trimTrailingLf(text: string): string {
+  let end = text.length;
+  while (end > 0 && text.charCodeAt(end - 1) === 10) {
+    end -= 1;
+  }
+  return text.slice(0, end);
+}
+
 export function upsertMarkedBlock(existing: string, block: string): string {
   parseStrictToml(existing, "existing TOML");
+  const eol = detectLineEnding(existing);
   const normalized = existing.replaceAll("\r\n", "\n");
   const wrapped = block.startsWith(TOML_MARKER_START) ? block.trim() : wrapMarkedBlock(block);
   const span = locateMarkedSpan(normalized);
@@ -178,29 +206,32 @@ export function upsertMarkedBlock(existing: string, block: string): string {
     candidate = `${base}\n${wrapped}\n`;
   }
   parseStrictToml(candidate, "generated TOML");
-  return candidate;
+  return applyLineEnding(candidate, eol);
 }
 
 export function removeMarkedBlock(existing: string): string {
   parseStrictToml(existing, "existing TOML");
+  const eol = detectLineEnding(existing);
   const normalized = existing.replaceAll("\r\n", "\n");
   const span = locateMarkedSpan(normalized);
-  if (span === null) return normalized;
-  const before = normalized.slice(0, span.start).replace(/\n+$/, "");
-  const after = normalized.slice(span.end).replace(/^\n+/, "");
+  if (span === null) return existing;
+  const before = trimTrailingLf(normalized.slice(0, span.start));
+  const after = trimLeadingLf(normalized.slice(span.end));
   let candidate: string;
   if (before.length === 0 && after.length === 0) candidate = "";
   else if (before.length === 0) candidate = after.endsWith("\n") ? after : `${after}\n`;
   else if (after.length === 0) candidate = `${before}\n`;
   else candidate = `${before}\n\n${after.endsWith("\n") ? after : `${after}\n`}`;
   parseStrictToml(candidate, "stripped TOML");
-  return candidate;
+  return applyLineEnding(candidate, eol);
 }
 
 function stripUnmarkedSnapperTableFromText(text: string): string {
+  const eol = detectLineEnding(text);
   const lines = text.replaceAll("\r\n", "\n").split("\n");
   const kept: string[] = [];
   let inSnapperTable = false;
+  let removedAny = false;
 
   for (const line of lines) {
     const trimmed = line.trim();
@@ -214,7 +245,16 @@ function stripUnmarkedSnapperTableFromText(text: string): string {
         trimmed.startsWith('[mcp_servers."snapper".')
       ) {
         inSnapperTable = true;
+        removedAny = true;
         continue;
+      }
+      if (
+        inSnapperTable &&
+        kept.length >= 2 &&
+        kept[kept.length - 1] === "" &&
+        kept[kept.length - 2] === ""
+      ) {
+        kept.pop();
       }
       inSnapperTable = false;
     }
@@ -222,8 +262,9 @@ function stripUnmarkedSnapperTableFromText(text: string): string {
       kept.push(line);
     }
   }
-  const joined = kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
-  return joined.length === 0 ? "" : `${joined}\n`;
+  if (!removedAny) return text;
+  const joined = trimTrailingLf(trimLeadingLf(kept.join("\n")));
+  return joined.length === 0 ? "" : applyLineEnding(`${joined}\n`, eol);
 }
 
 function removeSnapperServerPreservingAst(existing: string): string {
@@ -405,6 +446,34 @@ export function inspectGrokSnapperTable(existing: string): boolean {
   }
 }
 
+export function extractTomlSnapperInvocation(existing: string): {
+  readonly command: string;
+  readonly args: readonly string[];
+} | null {
+  try {
+    const ast = parseStrictToml(existing, "MCP config.toml");
+    const servers = ast["mcp_servers"];
+    if (servers === null || typeof servers !== "object" || Array.isArray(servers)) {
+      return null;
+    }
+    const snapper = (servers as Record<string, unknown>)["snapper"];
+    if (snapper === null || typeof snapper !== "object" || Array.isArray(snapper)) {
+      return null;
+    }
+    const command = (snapper as Record<string, unknown>)["command"];
+    if (typeof command !== "string" || command.length === 0) {
+      return null;
+    }
+    const rawArgs = (snapper as Record<string, unknown>)["args"];
+    const args = Array.isArray(rawArgs)
+      ? rawArgs.filter((item): item is string => typeof item === "string")
+      : [];
+    return { command, args };
+  } catch {
+    return null;
+  }
+}
+
 export interface KimiHookEntry {
   readonly event: string;
   readonly command: string;
@@ -449,12 +518,41 @@ export function renderKimiHooksBlock(entries: readonly KimiHookEntry[]): string 
   return block;
 }
 
+function hasSnapperKimiHooksInAst(doc: TomlObject): boolean {
+  const hooks = doc["hooks"];
+  return Array.isArray(hooks) && hooks.some((item) => isSnapperKimiHookItem(item));
+}
+
+function removeKimiHooksPreservingAst(existing: string): string {
+  const beforeAst = parseStrictToml(existing, "Kimi config.toml");
+  const expectedWithoutSnapper = withoutSnapperKimiHooks(beforeAst);
+  const withoutMarked = removeMarkedBlock(existing);
+  const afterMarkedAst = parseStrictToml(withoutMarked, "updated Kimi config.toml");
+  if (!isDeepStrictEqual(expectedWithoutSnapper, withoutSnapperKimiHooks(afterMarkedAst))) {
+    throw new TomlEditError("Kimi config.toml removal altered unrelated TOML keys");
+  }
+  if (!hasSnapperKimiHooksInAst(afterMarkedAst)) {
+    return withoutMarked;
+  }
+  const eol = detectLineEnding(existing);
+  if (Object.keys(expectedWithoutSnapper).length === 0) {
+    return "";
+  }
+  const serialized = stringifyToml(expectedWithoutSnapper);
+  const withLf = serialized.endsWith("\n") ? serialized : `${serialized}\n`;
+  return applyLineEnding(withLf, eol);
+}
+
 export function upsertKimiHooksBlock(
   existing: string,
   entries: readonly KimiHookEntry[],
 ): string {
   const beforeAst = parseStrictToml(existing, "Kimi config.toml");
-  const next = upsertMarkedBlock(existing, renderKimiHooksBlock(entries));
+  const cleaned =
+    locateMarkedSpan(existing.replaceAll("\r\n", "\n")) !== null
+      ? existing
+      : removeKimiHooksPreservingAst(existing);
+  const next = upsertMarkedBlock(cleaned, renderKimiHooksBlock(entries));
   const afterAst = parseStrictToml(next, "updated Kimi config.toml");
   if (!isDeepStrictEqual(withoutSnapperKimiHooks(beforeAst), withoutSnapperKimiHooks(afterAst))) {
     throw new TomlEditError("Kimi config.toml edit altered unrelated TOML keys");
@@ -463,13 +561,7 @@ export function upsertKimiHooksBlock(
 }
 
 export function removeKimiHooksBlock(existing: string): string {
-  const beforeAst = parseStrictToml(existing, "Kimi config.toml");
-  const next = removeMarkedBlock(existing);
-  const afterAst = parseStrictToml(next, "updated Kimi config.toml");
-  if (!isDeepStrictEqual(withoutSnapperKimiHooks(beforeAst), withoutSnapperKimiHooks(afterAst))) {
-    throw new TomlEditError("Kimi config.toml removal altered unrelated TOML keys");
-  }
-  return next;
+  return removeKimiHooksPreservingAst(existing);
 }
 
 export function inspectKimiHooksBlock(existing: string): boolean {

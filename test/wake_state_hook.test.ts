@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
@@ -6,7 +6,13 @@ import { Readable } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { SNAPPER_WAKE_PROMPT } from "../src/actionable.js";
-import { formatCliCommand, hookMain, parseHookArgs } from "../src/hook.js";
+import {
+  findExecutableOnPath,
+  formatCliCommand,
+  hookMain,
+  parseHookArgs,
+  resolveDefaultInvocation,
+} from "../src/hook.js";
 import type { ParentProcessSnapshot } from "../src/interactive.js";
 import { writeWakePreference } from "../src/state_dir.js";
 import {
@@ -164,6 +170,24 @@ describe("wake_state stores", () => {
     const switched = await readCodexWakeState(tempDir);
     expect(switched.threadId).toBe(threadB);
     expect(switched.deliveredSeq).toBe(switched.latestSeq);
+
+    await recordCodexActionableEvent(tempDir);
+    const res3 = await tryReserveCodexWake({
+      stateDir: tempDir,
+      isPidAlive: () => true,
+      nowMs: 2000,
+    });
+    expect(res3.reserved).toBe(true);
+    await recordCodexSession({
+      stateDir: tempDir,
+      codexPid: 9999,
+      codexStartToken: "tok-restarted",
+      threadId: threadB,
+      consumeReservation: false,
+    });
+    const restarted = await readCodexWakeState(tempDir);
+    expect(restarted.reservationId).toBeNull();
+    expect(restarted.deliveredSeq).toBe(restarted.latestSeq);
   });
 
   it("coordinates Antigravity helper ownership, turn state, reservation, and failure latch", async () => {
@@ -362,12 +386,65 @@ describe("formatCliCommand & parseHookArgs", () => {
 
     const win = formatCliCommand(
       { command: "C:\\Program Files\\nodejs\\node.exe", prefixArgs: ["C:\\app\\index.js"] },
-      ["watch", "--config", 'C:\\Users\\me\\my "cfg".json'],
+      ["watch", "--config", 'C:\\Users\\me\\my "cfg".json', "C:\\dir\\%APPDATA%\\cfg.json"],
       "win32",
     );
     expect(win).toBe(
-      '"C:\\Program Files\\nodejs\\node.exe" C:\\app\\index.js watch --config "C:\\Users\\me\\my \\"cfg\\".json"',
+      '"C:\\Program Files\\nodejs\\node.exe" C:\\app\\index.js watch --config "C:\\Users\\me\\my \\"cfg\\".json" "C:\\dir\\%%APPDATA%%\\cfg.json"',
     );
+  });
+
+  it("resolves executables on PATH, prefers symlinked shims, and rejects ephemeral npx paths", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "snapper-path-"));
+    const prevArgv1 = process.argv[1];
+    try {
+      expect(findExecutableOnPath("snapper-mcp", {}, "linux")).toBeNull();
+      expect(findExecutableOnPath("snapper-mcp", { PATH: "relative/bin" }, "linux")).toBeNull();
+
+      const scriptPath = path.join(dir, "dist-index.js");
+      await writeFile(scriptPath, "#!/usr/bin/env node\n", "utf8");
+      await chmod(scriptPath, 0o755);
+
+      const binDir = path.join(dir, "bin");
+      await rm(binDir, { recursive: true, force: true });
+      const { mkdir } = await import("node:fs/promises");
+      await mkdir(binDir, { recursive: true });
+
+      const winCmd = path.join(binDir, "snapper-mcp.cmd");
+      await writeFile(winCmd, "@echo off\r\n", "utf8");
+      expect(findExecutableOnPath("snapper-mcp", { Path: binDir }, "win32")).toBe(winCmd);
+      expect(findExecutableOnPath("snapper-mcp.cmd", { PATH: binDir }, "win32")).toBe(winCmd);
+
+      if (process.platform !== "win32") {
+        const shim = path.join(binDir, "snapper-mcp");
+        await symlink(scriptPath, shim);
+        process.argv[1] = scriptPath;
+        expect(resolveDefaultInvocation({ PATH: binDir }, "linux")).toEqual({
+          command: shim,
+        });
+
+        const nodeShim = path.join(binDir, "node");
+        await symlink(process.execPath, nodeShim);
+        const otherScript = path.join(dir, "other-index.js");
+        await writeFile(otherScript, "// entry\n", "utf8");
+        process.argv[1] = otherScript;
+        expect(resolveDefaultInvocation({ PATH: binDir }, "linux")).toEqual({
+          command: nodeShim,
+          prefixArgs: [otherScript],
+        });
+      }
+
+      process.argv[1] = "/tmp/_npx/abc123/node_modules/.bin/snapper-mcp";
+      expect(() =>
+        resolveDefaultInvocation({ PATH: binDir }, "linux", { rejectEphemeralNpx: true }),
+      ).toThrow(/ephemeral npx cache path/);
+
+      process.argv[1] = "";
+      expect(resolveDefaultInvocation({}, "linux")).toEqual({ command: "snapper-mcp" });
+    } finally {
+      process.argv[1] = prevArgv1!;
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it("parses valid hook flags and rejects missing or unknown flags", () => {
@@ -387,7 +464,7 @@ describe("formatCliCommand & parseHookArgs", () => {
       "linux",
     );
     expect(parsedSpace.client).toBe("codex");
-    expect(parsedSpace.configPath).toBe("/tmp/state/config.json");
+    expect(parsedSpace.configPath).toBe(path.resolve("/tmp/state", "config.json"));
 
     expect(() => parseHookArgs(["--event", "Stop"])).toThrow(/--client is required/);
     expect(() => parseHookArgs(["--client", "grok"])).toThrow(/--event is required/);
@@ -438,7 +515,7 @@ describe("hookMain client handlers", () => {
       stdout: out1,
       inspector: () => Promise.resolve(makeParent("grok", ["grok"])),
     });
-    expect(code1).toBe(0);
+    expect(code1).toBeUndefined();
     const decision = JSON.parse(out1.text()) as { decision: string; reason: string };
     expect(decision.decision).toBe("block");
     expect(decision.reason).toContain("snapper-mcp watch --client grok --actionable-only");
@@ -644,7 +721,7 @@ describe("hookMain client handlers", () => {
         source: env,
         stdout: claudeOut,
       }),
-    ).toBe(0);
+    ).toBeUndefined();
     expect(claudeOut.text()).toBe("");
 
     const failOpenOut = new OutputBuffer();
@@ -655,7 +732,7 @@ describe("hookMain client handlers", () => {
         stdin: "{malformed-json",
         stdout: failOpenOut,
       }),
-    ).toBe(0);
+    ).toBeUndefined();
     expect(failOpenOut.text()).toBe("");
   });
 });

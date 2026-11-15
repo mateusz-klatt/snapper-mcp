@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   classifyActionableFrame,
   DEFAULT_WAKE_KINDS,
+  formatClientAttentionLine,
   isWakeKind,
   KIMI_EXIT_ATTENTION,
   KIMI_EXIT_DISABLED,
@@ -47,7 +48,8 @@ describe("clients", () => {
 
   it("parses single, list, deduplicated, and 'all' client selections", () => {
     expect(parseClientSelection("all")).toEqual(SUPPORTED_CLIENTS);
-    expect(parseClientSelection(["claude", "ALL"])).toEqual(SUPPORTED_CLIENTS);
+    expect(parseClientSelection(["ALL"])).toEqual(SUPPORTED_CLIENTS);
+    expect(parseClientSelection(["ALL", "all"])).toEqual(SUPPORTED_CLIENTS);
     expect(parseClientSelection(["codex", "grok", "codex"])).toEqual([
       "codex",
       "grok",
@@ -55,10 +57,13 @@ describe("clients", () => {
     expect(parseClientSelection("cursor")).toEqual(["cursor"]);
   });
 
-  it("throws ClientArgError on empty or unsupported client names", () => {
+  it("throws ClientArgError on empty, unsupported, or mixed 'all' client names", () => {
     expect(() => parseClientName("vim")).toThrow(ClientArgError);
     expect(() => parseClientSelection([])).toThrow(ClientArgError);
     expect(() => parseClientSelection(["claude", "emacs"])).toThrow(ClientArgError);
+    expect(() => parseClientSelection(["claude", "ALL"])).toThrow(ClientArgError);
+    expect(() => parseClientSelection(["all", "typo"])).toThrow(ClientArgError);
+    expect(() => parseClientSelection(["typo", "all"])).toThrow(ClientArgError);
   });
 });
 
@@ -126,6 +131,8 @@ describe("actionable classification and wake prompts", () => {
     expect(SNAPPER_WAKE_PROMPT).toContain("untrusted data");
     expect(SNAPPER_COPILOT_ATTENTION_LINE).toContain("actionable activity");
     expect(SNAPPER_KIMI_ATTENTION_LINE).toContain("replacement watcher");
+    expect(formatClientAttentionLine("ai_review")).toContain("actionable ai_review activity");
+    expect(formatClientAttentionLine("ai_research")).toContain("untrusted data");
     expect(KIMI_EXIT_ATTENTION).toBe(0);
     expect(KIMI_OUTCOME_LINES[KIMI_EXIT_DISABLED]).toContain("Do not start another");
     expect(KIMI_OUTCOME_LINES[KIMI_EXIT_DUPLICATE]).toContain("Do not start another");

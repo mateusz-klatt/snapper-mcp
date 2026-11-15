@@ -20,12 +20,12 @@ try {
     const code = await doctorMain({ argv: argv.slice(1), stdout: process.stdout });
     process.exit(code);
   } else if (argv[0] === "hook") {
-    const code = await hookMain({
+    await hookMain({
       argv: argv.slice(1),
       stdin: process.stdin,
       stdout: process.stdout,
     });
-    process.exit(code);
+    process.exit(0);
   } else {
     await main({ argv });
   }

@@ -85,7 +85,8 @@ const AGY_PROMPTED: ReadonlySet<string> = new Set(["i", "prompt-interactive"]);
 
 export function agyMode(args: readonly string[]): ParsedClientMode {
   let mode: ParsedClientMode = "input";
-  for (let i = 1; i < args.length; i += 1) {
+  let i = 1;
+  while (i < args.length) {
     const arg = args[i]!;
     if (arg === "--") {
       if (i + 1 < args.length) return "command";
@@ -105,6 +106,7 @@ export function agyMode(args: readonly string[]): ParsedClientMode {
       return "print";
     }
     if (AGY_BOOLS.has(name)) {
+      i += 1;
       continue;
     }
     if (AGY_VALUES.has(name)) {
@@ -115,6 +117,7 @@ export function agyMode(args: readonly string[]): ParsedClientMode {
         i += 1;
         if (i >= args.length) return "unknown";
       }
+      i += 1;
       continue;
     }
     return "unknown";
@@ -236,7 +239,8 @@ function grokShorts(
 
 export function grokMode(args: readonly string[]): ParsedClientMode {
   let promptSeen = false;
-  for (let i = 1; i < args.length; i += 1) {
+  let i = 1;
+  while (i < args.length) {
     const arg = args[i]!;
     if (arg === "--") return "input";
     if (arg.startsWith("--")) {
@@ -245,12 +249,16 @@ export function grokMode(args: readonly string[]): ParsedClientMode {
       const attached = eqIdx >= 0;
       const name = attached ? body.slice(0, eqIdx) : body;
       if (GROK_PRINT.has(name)) return "print";
-      if (GROK_BOOLS.has(name)) continue;
+      if (GROK_BOOLS.has(name)) {
+        i += 1;
+        continue;
+      }
       if (GROK_VALUES.has(name)) {
         if (!attached) {
           i += 1;
           if (i >= args.length) return "unknown";
         }
+        i += 1;
         continue;
       }
       if (GROK_OPTIONAL.has(name)) {
@@ -258,6 +266,7 @@ export function grokMode(args: readonly string[]): ParsedClientMode {
         if (!attached && next !== undefined && !next.startsWith("-")) {
           i += 1;
         }
+        i += 1;
         continue;
       }
       return "unknown";
@@ -265,12 +274,13 @@ export function grokMode(args: readonly string[]): ParsedClientMode {
     if (arg.length > 1 && arg.startsWith("-")) {
       const [shortMode, nextIdx] = grokShorts(arg.slice(1), args, i);
       if (shortMode !== "input") return shortMode;
-      i = nextIdx;
+      i = nextIdx + 1;
       continue;
     }
     if (GROK_COMMANDS.has(arg)) return "command";
     if (promptSeen) return "unknown";
     promptSeen = true;
+    i += 1;
   }
   return "input";
 }
@@ -355,7 +365,8 @@ function kimiShorts(
 
 export function kimiMode(args: readonly string[]): ParsedClientMode {
   if (isKimiRewritten(args)) return "input";
-  for (let i = 1; i < args.length; i += 1) {
+  let i = 1;
+  while (i < args.length) {
     const arg = args[i]!;
     if (arg === "--") {
       return i + 1 < args.length ? "command" : "input";
@@ -366,12 +377,16 @@ export function kimiMode(args: readonly string[]): ParsedClientMode {
       const attached = eqIdx >= 0;
       const name = attached ? body.slice(0, eqIdx) : body;
       if (name === "prompt") return "print";
-      if (KIMI_BOOLS.has(name) && !attached) continue;
+      if (KIMI_BOOLS.has(name) && !attached) {
+        i += 1;
+        continue;
+      }
       if (KIMI_VALUES.has(name)) {
         if (!attached) {
           i += 1;
           if (i >= args.length) return "unknown";
         }
+        i += 1;
         continue;
       }
       if (KIMI_OPTIONAL.has(name)) {
@@ -379,6 +394,7 @@ export function kimiMode(args: readonly string[]): ParsedClientMode {
         if (!attached && next !== undefined && !next.startsWith("-")) {
           i += 1;
         }
+        i += 1;
         continue;
       }
       return "unknown";
@@ -386,7 +402,7 @@ export function kimiMode(args: readonly string[]): ParsedClientMode {
     if (arg.length > 1 && arg.startsWith("-")) {
       const [shortMode, nextIdx] = kimiShorts(arg.slice(1), args, i);
       if (shortMode !== "input") return shortMode;
-      i = nextIdx;
+      i = nextIdx + 1;
       continue;
     }
     if (KIMI_COMMANDS.has(arg)) return "command";
@@ -481,7 +497,8 @@ function cursorShorts(
 }
 
 export function cursorMode(args: readonly string[]): ParsedClientMode {
-  for (let i = 1; i < args.length; i += 1) {
+  let i = 1;
+  while (i < args.length) {
     const arg = args[i]!;
     if (arg === "--") return "input";
     if (arg.startsWith("--")) {
@@ -494,6 +511,7 @@ export function cursorMode(args: readonly string[]): ParsedClientMode {
       }
       if (CURSOR_BOOLS.has(name)) {
         if (attached) return "unknown";
+        i += 1;
         continue;
       }
       if (CURSOR_VALUES.has(name)) {
@@ -501,6 +519,7 @@ export function cursorMode(args: readonly string[]): ParsedClientMode {
           i += 1;
           if (i >= args.length) return "unknown";
         }
+        i += 1;
         continue;
       }
       if (CURSOR_OPTIONAL.has(name)) {
@@ -508,6 +527,7 @@ export function cursorMode(args: readonly string[]): ParsedClientMode {
         if (!attached && next !== undefined && !next.startsWith("-")) {
           i += 1;
         }
+        i += 1;
         continue;
       }
       return "unknown";
@@ -515,13 +535,40 @@ export function cursorMode(args: readonly string[]): ParsedClientMode {
     if (arg.length > 1 && arg.startsWith("-")) {
       const [shortMode, nextIdx] = cursorShorts(arg.slice(1), args, i);
       if (shortMode !== "input") return shortMode;
-      i = nextIdx;
+      i = nextIdx + 1;
       continue;
     }
     if (CURSOR_COMMANDS.has(arg)) return "command";
+    i += 1;
   }
   return "input";
 }
+
+const CODEX_BOOLS: ReadonlySet<string> = new Set([
+  "full-auto",
+  "dangerously-bypass-approvals-and-sandbox",
+  "yolo",
+  "oss",
+  "search",
+  "no-alt-screen",
+  "help",
+  "version",
+]);
+
+const CODEX_VALUES: ReadonlySet<string> = new Set([
+  "model",
+  "config",
+  "profile",
+  "sandbox",
+  "ask-for-approval",
+  "cd",
+  "image",
+  "add-dir",
+  "enable",
+  "disable",
+  "local-provider",
+  "color",
+]);
 
 const CODEX_COMMANDS: ReadonlySet<string> = new Set([
   "exec",
@@ -542,34 +589,77 @@ const CODEX_COMMANDS: ReadonlySet<string> = new Set([
   "help",
   "queue",
   "doctor",
+  "fork",
 ]);
 
-export function codexMode(args: readonly string[]): ParsedClientMode {
-  for (let i = 1; i < args.length; i += 1) {
-    const arg = args[i]!;
-    if (arg === "--") return "input";
-    if (arg.startsWith("-")) {
-      if (
-        arg === "-m" ||
-        arg === "--model" ||
-        arg === "-c" ||
-        arg === "--config" ||
-        arg === "-p" ||
-        arg === "--profile" ||
-        arg === "-s" ||
-        arg === "--sandbox" ||
-        arg === "-a" ||
-        arg === "--ask-for-approval" ||
-        arg === "-C" ||
-        arg === "--cd"
-      ) {
-        i += 1;
-        if (i >= args.length) return "unknown";
+function codexShorts(
+  group: string,
+  args: readonly string[],
+  index: number,
+): readonly [ParsedClientMode, number] {
+  for (let j = 0; j < group.length; j += 1) {
+    const ch = group[j]!;
+    if (ch === "h" || ch === "V") continue;
+    if (
+      ch === "m" ||
+      ch === "c" ||
+      ch === "p" ||
+      ch === "s" ||
+      ch === "a" ||
+      ch === "C" ||
+      ch === "i"
+    ) {
+      if (j + 1 === group.length) {
+        if (index + 1 >= args.length) return ["unknown", index + 1];
+        return ["input", index + 1];
       }
+      return ["input", index];
+    }
+    return ["unknown", index];
+  }
+  return ["input", index];
+}
+
+export function codexMode(args: readonly string[]): ParsedClientMode {
+  let promptSeen = false;
+  let i = 1;
+  while (i < args.length) {
+    const arg = args[i]!;
+    if (arg === "--") {
+      const rest = args.length - (i + 1);
+      return rest === 0 || (!promptSeen && rest === 1) ? "input" : "unknown";
+    }
+    if (arg === "-") return "unknown";
+    if (arg.startsWith("--")) {
+      const body = arg.slice(2);
+      const eqIdx = body.indexOf("=");
+      const attached = eqIdx >= 0;
+      const name = attached ? body.slice(0, eqIdx) : body;
+      if (CODEX_BOOLS.has(name)) {
+        if (attached) return "unknown";
+        i += 1;
+        continue;
+      }
+      if (CODEX_VALUES.has(name)) {
+        if (!attached) {
+          i += 1;
+          if (i >= args.length) return "unknown";
+        }
+        i += 1;
+        continue;
+      }
+      return "unknown";
+    }
+    if (arg.length > 1 && arg.startsWith("-")) {
+      const [shortMode, nextIdx] = codexShorts(arg.slice(1), args, i);
+      if (shortMode !== "input") return shortMode;
+      i = nextIdx + 1;
       continue;
     }
-    if (CODEX_COMMANDS.has(arg)) return "command";
-    return "input";
+    if (!promptSeen && CODEX_COMMANDS.has(arg)) return "command";
+    if (promptSeen) return "unknown";
+    promptSeen = true;
+    i += 1;
   }
   return "input";
 }
@@ -699,11 +789,15 @@ const defaultExecRunner: ExecCommandRunner = async (file, args, timeoutMs) => {
   return stdout;
 };
 
-export async function inspectLinuxProcess(pid: number): Promise<ParentProcessSnapshot | null> {
+export async function inspectLinuxProcess(
+  pid: number,
+  procRoot = "/proc",
+): Promise<ParentProcessSnapshot | null> {
+  const pidDir = `${procRoot}/${pid}`;
   try {
     const [cmdRaw, statText] = await Promise.all([
-      readFile(`/proc/${pid}/cmdline`),
-      readFile(`/proc/${pid}/stat`, "utf8"),
+      readFile(`${pidDir}/cmdline`),
+      readFile(`${pidDir}/stat`, "utf8"),
     ]);
     const parsedStat = parseLinuxStat(statText);
     if (parsedStat === null || cmdRaw.length === 0) return null;
@@ -715,12 +809,12 @@ export async function inspectLinuxProcess(pid: number): Promise<ParentProcessSna
 
     let exeName = parts[0]!;
     try {
-      exeName = await readlink(`/proc/${pid}/exe`);
+      exeName = await readlink(`${pidDir}/exe`);
     } catch {
       // Fallback to argv[0] when /proc/<pid>/exe cannot be read.
     }
 
-    const fd0Link = await readlink(`/proc/${pid}/fd/0`).catch(() => "");
+    const fd0Link = await readlink(`${pidDir}/fd/0`).catch(() => "");
     return {
       pid,
       ppid: parsedStat.ppid,
@@ -732,6 +826,65 @@ export async function inspectLinuxProcess(pid: number): Promise<ParentProcessSna
   } catch {
     return null;
   }
+}
+
+export function splitPosixCommandLine(line: string): string[] | null {
+  const trimmed = line.trim();
+  if (trimmed.length === 0) return null;
+  const args: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | null = null;
+  let tokenStarted = false;
+  let i = 0;
+
+  while (i < trimmed.length) {
+    const ch = trimmed[i]!;
+    if (quote === null && (ch === " " || ch === "\t")) {
+      if (tokenStarted) {
+        args.push(current);
+        current = "";
+        tokenStarted = false;
+      }
+      i += 1;
+      continue;
+    }
+    tokenStarted = true;
+    if (quote === "'") {
+      if (ch === "'") {
+        quote = null;
+      } else {
+        current += ch;
+      }
+      i += 1;
+      continue;
+    }
+    if (ch === "\\") {
+      if (i + 1 >= trimmed.length) return null;
+      current += trimmed[i + 1]!;
+      i += 2;
+      continue;
+    }
+    if (quote === '"') {
+      if (ch === '"') {
+        quote = null;
+      } else {
+        current += ch;
+      }
+      i += 1;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      i += 1;
+      continue;
+    }
+    current += ch;
+    i += 1;
+  }
+
+  if (quote !== null) return null;
+  if (tokenStarted) args.push(current);
+  return args.length > 0 ? args : null;
 }
 
 export async function inspectDarwinProcess(
@@ -750,7 +903,8 @@ export async function inspectDarwinProcess(
     const tty = ttyRaw.trim();
     const ppid = Number(ppidRaw.trim());
     if (commandLine.length === 0 || startToken.length === 0) return null;
-    const argv = commandLine.split(/\s+/);
+    const argv = splitPosixCommandLine(commandLine);
+    if (argv === null) return null;
     return {
       pid,
       ppid: Number.isInteger(ppid) && ppid > 0 ? ppid : 0,

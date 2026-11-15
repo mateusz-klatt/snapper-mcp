@@ -30,6 +30,8 @@ export interface ManifestFileRecord {
   readonly existedBefore: boolean;
   readonly backupBase64: string | null;
   readonly writtenSha256: string;
+  readonly originalMode?: number | null;
+  readonly createdDirs?: readonly string[];
 }
 
 export interface IntegrationManifest {
@@ -158,6 +160,57 @@ export async function assertNotSymlinkOrSpecial(
   }
 }
 
+async function collectMissingAncestorDirs(filePath: string): Promise<string[]> {
+  const missing: string[] = [];
+  let dir = path.dirname(path.resolve(filePath));
+  while (true) {
+    try {
+      const st = await lstat(dir);
+      if (st.isSymbolicLink()) {
+        throw new UnsafeFileTargetError(`refusing symlink directory path: ${dir}`);
+      }
+      if (!st.isDirectory()) {
+        throw new UnsafeFileTargetError(`refusing non-directory ancestor path: ${dir}`);
+      }
+      break;
+    } catch (err) {
+      if (!isMissingError(err)) throw err;
+      missing.push(dir);
+      const parent = path.dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+  }
+  return missing;
+}
+
+export async function ensureParentDirForFile(
+  filePath: string,
+  dirMode = 0o700,
+  platform: NodeJS.Platform = process.platform,
+): Promise<readonly string[]> {
+  const missingDeepestFirst = await collectMissingAncestorDirs(filePath);
+  for (let i = missingDeepestFirst.length - 1; i >= 0; i -= 1) {
+    const dir = missingDeepestFirst[i]!;
+    await mkdir(dir, { recursive: true, mode: dirMode });
+    if (platform !== "win32") {
+      await chmod(dir, dirMode);
+    }
+  }
+  return missingDeepestFirst;
+}
+
+async function statFileModeIfPresent(targetPath: string): Promise<number | null> {
+  await assertNotSymlinkOrSpecial(targetPath, false);
+  try {
+    const st = await lstat(targetPath);
+    return st.mode & 0o777;
+  } catch (err) {
+    if (isMissingError(err)) return null;
+    throw err;
+  }
+}
+
 export async function ensurePrivateDir(
   dirPath: string,
   platform: NodeJS.Platform = process.platform,
@@ -177,8 +230,11 @@ export async function writeFileAtomic(
   const mode = options.mode ?? 0o600;
   const platform = options.platform ?? process.platform;
   await assertNotSymlinkOrSpecial(targetPath, false);
-  const parent = path.dirname(targetPath);
-  await mkdir(parent, { recursive: true, mode: mode === 0o600 ? 0o700 : 0o755 });
+  await ensureParentDirForFile(
+    targetPath,
+    (mode & 0o077) === 0 ? 0o700 : 0o755,
+    platform,
+  );
   const tmp = `${targetPath}.tmp.${process.pid}.${randomUUID()}`;
   try {
     await writeFile(tmp, content, { mode });
@@ -490,6 +546,7 @@ export async function updateManagedFile(params: {
 }): Promise<void> {
   const platform = params.platform ?? process.platform;
   const resolvedTarget = path.resolve(params.targetPath);
+  const currentMode = await statFileModeIfPresent(resolvedTarget);
   const existingBytes = await readBytesIfPresent(resolvedTarget);
   const existingText = existingBytes === null ? null : existingBytes.toString("utf8");
   const nextText = params.render(existingText);
@@ -497,20 +554,47 @@ export async function updateManagedFile(params: {
     return;
   }
 
+  const missingDirs = await collectMissingAncestorDirs(resolvedTarget);
   const manifest = await loadManifest(params.stateDir);
   const prior = manifest.entries.find(
     (entry) => entry.client === params.client && entry.path === resolvedTarget,
   );
+  const priorUntouched =
+    prior !== undefined &&
+    existingBytes !== null &&
+    sha256Hex(existingBytes) === prior.writtenSha256;
+
+  let existedBefore: boolean;
+  let backupBase64: string | null;
+  if (prior !== undefined) {
+    if (priorUntouched) {
+      existedBefore = prior.existedBefore;
+      backupBase64 = prior.backupBase64;
+    } else {
+      existedBefore = true;
+      backupBase64 = null;
+    }
+  } else {
+    existedBefore = existingBytes !== null;
+    backupBase64 = existingBytes === null ? null : existingBytes.toString("base64");
+  }
+
+  const originalMode = prior !== undefined ? (prior.originalMode ?? currentMode) : currentMode;
+  const priorCreatedDirs = prior?.createdDirs ?? [];
+  const mergedCreatedDirs = [
+    ...missingDirs,
+    ...priorCreatedDirs.filter((d) => !missingDirs.includes(d)),
+  ];
+  const effectiveMode = params.mode ?? currentMode ?? 0o600;
+
   const record: ManifestFileRecord = {
     path: resolvedTarget,
     client: params.client,
-    existedBefore: prior ? prior.existedBefore : existingBytes !== null,
-    backupBase64: prior
-      ? prior.backupBase64
-      : existingBytes === null
-        ? null
-        : existingBytes.toString("base64"),
+    existedBefore,
+    backupBase64,
     writtenSha256: sha256Hex(nextText),
+    originalMode,
+    createdDirs: mergedCreatedDirs,
   };
   const filtered = manifest.entries.filter(
     (entry) => !(entry.client === params.client && entry.path === resolvedTarget),
@@ -521,19 +605,17 @@ export async function updateManagedFile(params: {
     platform,
   );
   await writeFileAtomic(resolvedTarget, nextText, {
-    mode: params.mode ?? 0o644,
+    mode: effectiveMode,
     platform,
   });
 }
 
-async function pruneEmptyParentDirs(filePath: string, levels = 3): Promise<void> {
-  let dir = path.dirname(filePath);
-  for (let i = 0; i < levels; i += 1) {
+async function pruneCreatedDirs(createdDirs: readonly string[]): Promise<void> {
+  for (const dir of createdDirs) {
     try {
       const st = await lstat(dir);
       if (st.isSymbolicLink() || !st.isDirectory()) break;
       await rmdir(dir);
-      dir = path.dirname(dir);
     } catch {
       break;
     }
@@ -558,19 +640,22 @@ export async function unwireManagedClient(params: {
   );
 
   for (const entry of owned) {
+    const currentMode = await statFileModeIfPresent(entry.path);
     const current = await readTextIfPresent(entry.path);
     if (current === null) {
+      await pruneCreatedDirs(entry.createdDirs ?? []);
       continue;
     }
+    const targetMode = entry.originalMode ?? currentMode ?? 0o600;
     const unchangedSinceInstall = sha256Hex(current) === entry.writtenSha256;
     if (!entry.existedBefore && unchangedSinceInstall) {
       await rm(entry.path, { force: true });
-      await pruneEmptyParentDirs(entry.path);
+      await pruneCreatedDirs(entry.createdDirs ?? []);
       continue;
     }
     if (unchangedSinceInstall && entry.backupBase64 !== null) {
       await writeFileAtomic(entry.path, Buffer.from(entry.backupBase64, "base64"), {
-        mode: 0o644,
+        mode: targetMode,
         platform,
       });
       continue;
@@ -578,11 +663,16 @@ export async function unwireManagedClient(params: {
     const stripped = params.strip(entry.path, current);
     if (stripped === null) {
       await rm(entry.path, { force: true });
-      await pruneEmptyParentDirs(entry.path);
+      await pruneCreatedDirs(entry.createdDirs ?? []);
     } else if (stripped !== current) {
-      await writeFileAtomic(entry.path, stripped, { mode: 0o644, platform });
+      await writeFileAtomic(entry.path, stripped, { mode: targetMode, platform });
     }
   }
 
-  await saveManifest(params.stateDir, { version: 1, entries: remaining }, platform);
+  if (remaining.length === 0) {
+    await assertNotSymlinkOrSpecial(manifestPath(params.stateDir), false);
+    await rm(manifestPath(params.stateDir), { force: true });
+  } else {
+    await saveManifest(params.stateDir, { version: 1, entries: remaining }, platform);
+  }
 }

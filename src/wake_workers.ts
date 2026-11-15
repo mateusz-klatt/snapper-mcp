@@ -10,6 +10,7 @@
 import { execFile, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import net from "node:net";
+import path from "node:path";
 import { Duplex } from "node:stream";
 import { promisify } from "node:util";
 import WebSocket from "ws";
@@ -22,9 +23,11 @@ import {
 } from "./actionable.js";
 import { computeWsUrl, type BridgeEnv } from "./env.js";
 import { EnvelopeMinter } from "./envelope.js";
+import { findExecutableOnPath } from "./hook.js";
 import {
   checkInteractiveSession,
   inspectParentProcess,
+  matchesExpectedExecutable,
   type ParentProcessInspector,
 } from "./interactive.js";
 import type { Logger } from "./logger.js";
@@ -40,6 +43,7 @@ import {
   latchAntigravityFailed,
   publishAntigravityHelper,
   readAntigravityWakeState,
+  readCodexWakeState,
   recordCodexActionableEvent,
   recordCursorActionableEvent,
   setAntigravityReservation,
@@ -220,25 +224,69 @@ export async function startCursorWakeWorker(params: {
   readonly logger: Logger;
   readonly wsClientFactory?: (opts: WsClientOptions) => WsClient;
 }): Promise<WakeWorkerHandle> {
-  return startActionableClient({
+  const inFlight = new Set<Promise<unknown>>();
+  const stream = await startActionableClient({
     env: params.env,
     logger: params.logger,
     wsClientFactory: params.wsClientFactory,
     onActionable: () => {
-      void recordCursorActionableEvent(params.stateDir).catch((err) => {
-        const msg = err instanceof Error ? err.message : String(err);
-        params.logger.warn(`cursor wake state update failed: ${msg}`);
-      });
+      const writeOp = recordCursorActionableEvent(params.stateDir)
+        .catch((err) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          params.logger.warn(`cursor wake state update failed: ${msg}`);
+        })
+        .finally(() => {
+          inFlight.delete(writeOp);
+        });
+      inFlight.add(writeOp);
     },
   });
+  return {
+    close: async () => {
+      await stream.close();
+      if (inFlight.size > 0) {
+        await Promise.allSettled([...inFlight]);
+      }
+    },
+  };
 }
 
 /* --------------------------------------------------------------------
- * Codex idle-checked wake worker
+ * Subprocess target resolution & Codex idle-checked wake worker
  * ------------------------------------------------------------------ */
 
-export type CodexIdleProbe = (threadId: string) => Promise<boolean>;
-export type CodexQueueSender = (threadId: string, message: string) => Promise<boolean>;
+export type CodexIdleProbe = (
+  threadId: string,
+  signal?: AbortSignal,
+) => Promise<boolean>;
+export type CodexQueueSender = (
+  threadId: string,
+  message: string,
+  signal?: AbortSignal,
+) => Promise<boolean>;
+
+export function resolveSubprocessTarget(
+  rawCommand: string,
+  args: readonly string[],
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): { readonly file: string; readonly args: readonly string[] } | null {
+  const trimmed = rawCommand.trim();
+  if (trimmed.length === 0) return null;
+  const isPathQualified =
+    trimmed.includes("/") || trimmed.includes("\\") || path.isAbsolute(trimmed);
+  const candidate = isPathQualified
+    ? path.resolve(trimmed)
+    : findExecutableOnPath(trimmed, env, platform);
+  if (candidate === null || !path.isAbsolute(candidate)) {
+    return null;
+  }
+  const lower = candidate.toLowerCase();
+  if (lower.endsWith(".mjs") || lower.endsWith(".cjs") || lower.endsWith(".js")) {
+    return { file: process.execPath, args: [candidate, ...args] };
+  }
+  return { file: candidate, args: [...args] };
+}
 
 function createChildProcessDuplex(
   childStdin: NodeJS.WritableStream,
@@ -270,18 +318,34 @@ function createChildProcessDuplex(
 
 export async function probeCodexThreadIdleViaProxy(
   threadId: string,
-  codexCommand = "codex",
+  codexCommand?: string,
   timeoutMs = 5_000,
+  signal?: AbortSignal,
 ): Promise<boolean> {
+  if (signal?.aborted) {
+    return false;
+  }
+  const resolved = resolveSubprocessTarget(codexCommand ?? "codex", [
+    "app-server",
+    "proxy",
+  ]);
+  if (resolved === null) {
+    return false;
+  }
+
   return new Promise<boolean>((resolve) => {
     let settled = false;
+    let onAbort: (() => void) | null = null;
     const finish = (idle: boolean): void => {
       if (settled) return;
       settled = true;
+      if (onAbort !== null) {
+        signal?.removeEventListener("abort", onAbort);
+      }
       resolve(idle);
     };
 
-    const child = spawn(codexCommand, ["app-server", "proxy"], {
+    const child = spawn(resolved.file, resolved.args, {
       stdio: ["pipe", "pipe", "ignore"],
       windowsHide: true,
     });
@@ -300,6 +364,14 @@ export async function probeCodexThreadIdleViaProxy(
       createConnection: () => duplex as unknown as net.Socket,
       maxPayload: 256 * 1024,
     });
+
+    onAbort = () => {
+      clearTimeout(timer);
+      ws.close();
+      child.kill();
+      finish(false);
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
 
     ws.once("error", () => {
       clearTimeout(timer);
@@ -368,15 +440,27 @@ export async function probeCodexThreadIdleViaProxy(
 export async function queueCodexWakeMessage(
   threadId: string,
   message: string,
-  codexCommand = "codex",
-  timeoutMs = 15_000,
+  codexCommand?: string,
+  timeoutMs = 5_000,
+  signal?: AbortSignal,
 ): Promise<boolean> {
+  const resolved = resolveSubprocessTarget(codexCommand ?? "codex", [
+    "queue",
+    "--thread",
+    threadId,
+    "--resume",
+    "--message",
+    message,
+  ]);
+  if (resolved === null) {
+    return false;
+  }
   try {
-    const { stdout } = await execFileAsync(
-      codexCommand,
-      ["queue", "--thread", threadId, "--resume", "--message", message],
-      { timeout: timeoutMs, windowsHide: true },
-    );
+    const { stdout } = await execFileAsync(resolved.file, resolved.args, {
+      timeout: timeoutMs,
+      windowsHide: true,
+      signal,
+    });
     const trimmed = stdout.trim();
     return (
       trimmed.startsWith("Queued message ") &&
@@ -399,32 +483,57 @@ export interface CodexWakeWorkerOptions {
   readonly pollMs?: number;
 }
 
+async function revalidateCodexReservation(params: {
+  readonly stateDir: string;
+  readonly reservationId: string;
+  readonly threadId: string;
+  readonly isPidAlive: (pid: number) => boolean;
+}): Promise<{ readonly valid: boolean; readonly shouldRetry: boolean }> {
+  const pref = await readWakePreference(params.stateDir, "codex");
+  if (pref === "off") {
+    return { valid: false, shouldRetry: false };
+  }
+  const current = await readCodexWakeState(params.stateDir);
+  const valid =
+    current.reservationId === params.reservationId &&
+    current.threadId === params.threadId &&
+    current.codexPid !== null &&
+    params.isPidAlive(current.codexPid);
+  return {
+    valid,
+    shouldRetry: !valid && current.latestSeq > current.deliveredSeq,
+  };
+}
+
 export async function startCodexWakeWorker(
   options: CodexWakeWorkerOptions,
 ): Promise<WakeWorkerHandle> {
-  const idleProbe = options.idleProbe ?? ((id) => probeCodexThreadIdleViaProxy(id));
+  const idleProbe =
+    options.idleProbe ??
+    ((id, sig) => probeCodexThreadIdleViaProxy(id, undefined, 5_000, sig));
   const queueSender =
-    options.queueSender ?? ((id, msg) => queueCodexWakeMessage(id, msg));
+    options.queueSender ??
+    ((id, msg, sig) => queueCodexWakeMessage(id, msg, undefined, 5_000, sig));
   const isPidAlive = options.isPidAlive ?? defaultIsPidAlive;
   const settleMs = options.settleMs ?? 1_000;
   const pollMs = options.pollMs ?? 5_000;
 
+  const abortController = new AbortController();
+  const pendingRecords = new Set<Promise<unknown>>();
   let closed = false;
-  let runningStep = false;
+  let activeStepPromise: Promise<void> | null = null;
   let stepTimer: ReturnType<typeof setTimeout> | null = null;
 
   const scheduleStep = (delayMs: number): void => {
     if (closed || stepTimer !== null) return;
     stepTimer = setTimeout(() => {
       stepTimer = null;
-      void runStep();
+      triggerStep();
     }, delayMs);
     stepTimer.unref();
   };
 
-  const runStep = async (): Promise<void> => {
-    if (closed || runningStep) return;
-    runningStep = true;
+  const executeStep = async (): Promise<void> => {
     try {
       const pref = await readWakePreference(options.stateDir, "codex");
       if (pref === "off") return;
@@ -435,8 +544,35 @@ export async function startCodexWakeWorker(
       });
       if (!reservation.reserved) return;
 
-      const idle = await idleProbe(reservation.threadId);
-      if (!idle || closed) {
+      const idle = await idleProbe(reservation.threadId, abortController.signal);
+      if (closed) {
+        await settleCodexReservation({
+          stateDir: options.stateDir,
+          reservationId: reservation.reservationId,
+          submitted: false,
+        });
+        return;
+      }
+
+      const recheck = await revalidateCodexReservation({
+        stateDir: options.stateDir,
+        reservationId: reservation.reservationId,
+        threadId: reservation.threadId,
+        isPidAlive,
+      });
+      if (!recheck.valid) {
+        await settleCodexReservation({
+          stateDir: options.stateDir,
+          reservationId: reservation.reservationId,
+          submitted: false,
+        });
+        if (recheck.shouldRetry) {
+          scheduleStep(settleMs);
+        }
+        return;
+      }
+
+      if (!idle) {
         await settleCodexReservation({
           stateDir: options.stateDir,
           reservationId: reservation.reservationId,
@@ -446,21 +582,37 @@ export async function startCodexWakeWorker(
         return;
       }
 
-      const queued = await queueSender(reservation.threadId, SNAPPER_WAKE_PROMPT);
+      const queued = await queueSender(
+        reservation.threadId,
+        SNAPPER_WAKE_PROMPT,
+        abortController.signal,
+      );
       await settleCodexReservation({
         stateDir: options.stateDir,
         reservationId: reservation.reservationId,
         submitted: queued,
       });
+      if (closed) return;
       if (!queued) {
         scheduleStep(pollMs);
+        return;
+      }
+      const afterState = await readCodexWakeState(options.stateDir);
+      if (afterState.latestSeq > afterState.deliveredSeq && afterState.reservationId === null) {
+        scheduleStep(settleMs);
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       options.logger.warn(`codex wake step failed: ${msg}`);
-    } finally {
-      runningStep = false;
     }
+  };
+
+  const triggerStep = (): void => {
+    if (closed || activeStepPromise !== null) return;
+    const p = executeStep().finally(() => {
+      activeStepPromise = null;
+    });
+    activeStepPromise = p;
   };
 
   const stream = await startActionableClient({
@@ -468,11 +620,15 @@ export async function startCodexWakeWorker(
     logger: options.logger,
     wsClientFactory: options.wsClientFactory,
     onActionable: () => {
-      void recordCodexActionableEvent(options.stateDir)
+      const rec = recordCodexActionableEvent(options.stateDir)
         .then(() => {
           scheduleStep(settleMs);
         })
-        .catch(() => undefined);
+        .catch(() => undefined)
+        .finally(() => {
+          pendingRecords.delete(rec);
+        });
+      pendingRecords.add(rec);
     },
   });
 
@@ -483,7 +639,14 @@ export async function startCodexWakeWorker(
         clearTimeout(stepTimer);
         stepTimer = null;
       }
+      abortController.abort();
       await stream.close();
+      if (pendingRecords.size > 0) {
+        await Promise.allSettled([...pendingRecords]);
+      }
+      if (activeStepPromise !== null) {
+        await activeStepPromise;
+      }
     },
   };
 }
@@ -581,10 +744,18 @@ export async function sendAntigravityWakeMessage(params: {
   readonly env: NodeJS.ProcessEnv;
   readonly timeoutMs?: number;
 }): Promise<boolean> {
+  const resolved = resolveSubprocessTarget(
+    params.agyExecutable,
+    ["agentapi", "send-message", params.conversationId, params.message],
+    params.env,
+  );
+  if (resolved === null) {
+    return false;
+  }
   try {
     const { stdout, stderr } = await execFileAsync(
-      params.agyExecutable,
-      ["agentapi", "send-message", params.conversationId, params.message],
+      resolved.file,
+      resolved.args,
       {
         env: params.env,
         timeout: params.timeoutMs ?? 15_000,
@@ -775,6 +946,44 @@ async function runAntigravityLauncher(
   return 0;
 }
 
+interface AntigravityHandshake {
+  readonly agyPid: number;
+  readonly agyStartToken: string;
+  readonly attemptId: string;
+  readonly agyExe: string;
+}
+
+function parseAntigravityHandshake(raw: string): AntigravityHandshake | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return null;
+  }
+  const obj = parsed as Record<string, unknown>;
+  const agyPid = obj["agyPid"];
+  const agyStartToken = obj["agyStartToken"];
+  const attemptId = obj["attemptId"];
+  const agyExe = obj["agyExe"];
+  if (
+    typeof agyPid !== "number" ||
+    !Number.isInteger(agyPid) ||
+    agyPid <= 1 ||
+    typeof agyStartToken !== "string" ||
+    agyStartToken.trim().length === 0 ||
+    typeof attemptId !== "string" ||
+    attemptId.trim().length === 0 ||
+    typeof agyExe !== "string" ||
+    !matchesExpectedExecutable("antigravity", agyExe)
+  ) {
+    return null;
+  }
+  return { agyPid, agyStartToken, attemptId, agyExe };
+}
+
 async function runAntigravityChildHelper(
   options: AntigravityWakeOptions,
   rawHandshake: string,
@@ -784,15 +993,8 @@ async function runAntigravityChildHelper(
   const settleMs = options.settleMs ?? 1_000;
   const pollMs = options.pollMs ?? 5_000;
 
-  let handshake: {
-    readonly agyPid: number;
-    readonly agyStartToken: string;
-    readonly attemptId: string;
-    readonly agyExe: string;
-  };
-  try {
-    handshake = JSON.parse(rawHandshake) as typeof handshake;
-  } catch {
+  const handshake = parseAntigravityHandshake(rawHandshake);
+  if (handshake === null) {
     return 1;
   }
 
