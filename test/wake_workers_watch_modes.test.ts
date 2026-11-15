@@ -297,8 +297,10 @@ describe("Cursor and Codex wake workers", () => {
 
     const queuedTo: string[] = [];
     let releaseFirstProbe: (() => void) | null = null;
+    let releaseAfterAbort: (() => void) | null = null;
     let firstProbeEntered = false;
     let blockOnCloseProbe = false;
+    let closeProbeListenerReady = false;
     let closeProbeAborted = false;
     let closeStepFinished = false;
 
@@ -323,6 +325,12 @@ describe("Cursor and Codex wake workers", () => {
         }
         if (blockOnCloseProbe) {
           await new Promise<void>((resolve) => {
+            if (signal?.aborted) {
+              closeProbeAborted = true;
+              closeProbeListenerReady = true;
+              resolve();
+              return;
+            }
             signal?.addEventListener(
               "abort",
               () => {
@@ -331,8 +339,11 @@ describe("Cursor and Codex wake workers", () => {
               },
               { once: true },
             );
+            closeProbeListenerReady = true;
           });
-          await new Promise((r) => setTimeout(r, 15));
+          await new Promise<void>((r) => {
+            releaseAfterAbort = r;
+          });
           closeStepFinished = true;
           return false;
         }
@@ -344,42 +355,66 @@ describe("Cursor and Codex wake workers", () => {
       },
     });
 
-    // 1. Emit event for threadA; while idleProbe(threadA) is in-flight, user switches to threadB and a new event arrives:
-    emit(makeReviewRequest());
-    await waitFor(() => firstProbeEntered, { message: "entered first idleProbe" });
-    await recordCodexSession({
-      stateDir,
-      codexPid: 9100,
-      codexStartToken: "tok-9100",
-      threadId: threadB,
-      consumeReservation: false,
-    });
-    await recordCodexActionableEvent(stateDir);
-    releaseFirstProbe!();
+    try {
+      // 1. Emit event for threadA; while idleProbe(threadA) is in-flight, user switches to threadB and a new event arrives:
+      emit(makeReviewRequest());
+      await waitFor(() => firstProbeEntered, { message: "entered first idleProbe" });
+      await recordCodexSession({
+        stateDir,
+        codexPid: 9100,
+        codexStartToken: "tok-9100",
+        threadId: threadB,
+        consumeReservation: false,
+      });
+      await recordCodexActionableEvent(stateDir);
+      emit(makeReviewRequest({ sequence_id: 50, public_id: "0192f000-0000-7000-8000-eeeeeeeeee50" }));
+      await new Promise((r) => setTimeout(r, 25));
+      releaseFirstProbe?.();
+      releaseFirstProbe = null;
 
-    // threadA must NEVER be queued; threadB must be woken cleanly!
-    await waitFor(() => queuedTo.includes(threadB), { message: "woke rebound threadB" });
-    expect(queuedTo).toEqual([threadB]);
+      // threadA must NEVER be queued; threadB must be woken cleanly and settled on disk!
+      await waitFor(
+        async () =>
+          queuedTo.includes(threadB) &&
+          (await readCodexWakeState(stateDir)).deliveredSeq >= 2,
+        { message: "woke rebound threadB and settled reservation" },
+      );
+      expect(queuedTo).toEqual([threadB]);
 
-    // Consume reservation on threadB, then test close() aborting & awaiting in-flight step:
-    await recordCodexSession({
-      stateDir,
-      codexPid: 9100,
-      codexStartToken: "tok-9100",
-      threadId: threadB,
-      consumeReservation: true,
-    });
-    blockOnCloseProbe = true;
-    emit(makeReviewRequest({ sequence_id: 99, public_id: "0192f000-0000-7000-8000-ffffffffffff" }));
-    await waitFor(
-      async () => (await readCodexWakeState(stateDir)).reservationId !== null,
-      { message: "reserved before close" },
-    );
+      // 2. Consume reservation on threadB, then test close() aborting & awaiting in-flight step deterministically:
+      await recordCodexSession({
+        stateDir,
+        codexPid: 9100,
+        codexStartToken: "tok-9100",
+        threadId: threadB,
+        consumeReservation: true,
+      });
+      blockOnCloseProbe = true;
+      emit(makeReviewRequest({ sequence_id: 99, public_id: "0192f000-0000-7000-8000-ffffffffffff" }));
+      await waitFor(() => closeProbeListenerReady, {
+        message: "close idleProbe registered abort listener",
+      });
 
-    await worker.close();
-    expect(closeProbeAborted).toBe(true);
-    expect(closeStepFinished).toBe(true);
-    expect((await readCodexWakeState(stateDir)).reservationId).toBeNull();
+      let closeResolved = false;
+      const closePromise = worker.close().then(() => {
+        closeResolved = true;
+      });
+      await waitFor(() => closeProbeAborted && releaseAfterAbort !== null, {
+        message: "close() aborted probe and reached post-abort barrier",
+      });
+      expect(closeResolved).toBe(false);
+
+      releaseAfterAbort?.();
+      releaseAfterAbort = null;
+      await closePromise;
+      expect(closeResolved).toBe(true);
+      expect(closeStepFinished).toBe(true);
+      expect((await readCodexWakeState(stateDir)).reservationId).toBeNull();
+    } finally {
+      releaseFirstProbe?.();
+      releaseAfterAbort?.();
+      await worker.close();
+    }
   });
 
   it("runs probeCodexThreadIdleViaProxy and queueCodexWakeMessage against local mock scripts", async () => {
