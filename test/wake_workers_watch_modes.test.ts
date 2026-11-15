@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
 import { tmpdir } from "node:os";
@@ -23,7 +23,7 @@ import type { BridgeEnv } from "../src/env.js";
 import type { ParentProcessSnapshot } from "../src/interactive.js";
 import { createLogger, setStderrWriterForTests } from "../src/logger.js";
 import { extractProxyWakeArgs } from "../src/main.js";
-import { acquireSessionLock, writeWakePreference } from "../src/state_dir.js";
+import { acquireSessionLock, defaultIsPidAlive, writeWakePreference } from "../src/state_dir.js";
 import type { AiReviewDecisionAckFrame, AiReviewRequestFrame, ServerFrame } from "../src/types.js";
 import {
   consumeCursorFollowup,
@@ -466,6 +466,161 @@ describe("Cursor and Codex wake workers", () => {
     expect(
       await queueCodexWakeMessage(threadId, "hello", "/nonexistent/codex-bin", 500),
     ).toBe(false);
+
+    const loudQueueScript = path.join(stateDir, "mock-codex-loud.mjs");
+    await writeFile(
+      loudQueueScript,
+      [
+        "#!/usr/bin/env node",
+        `process.stdout.write("x".repeat(70 * 1024));`,
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    expect(await queueCodexWakeMessage(threadId, "hello", loudQueueScript, 2_000)).toBe(false);
+  });
+
+  it("rejects pre-aborted signals before spawn and joins SIGTERM-resistant real child processes on worker.close()", async () => {
+    const threadId = "33333333-3333-4333-8333-333333333333";
+    const markerPath = path.join(stateDir, "never-spawned.txt");
+    const spawnMarkerScript = path.join(stateDir, "mock-codex-marker.mjs");
+    await writeFile(
+      spawnMarkerScript,
+      [
+        "#!/usr/bin/env node",
+        `import { writeFileSync } from "node:fs";`,
+        `writeFileSync(${JSON.stringify(markerPath)}, String(process.pid), "utf8");`,
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+
+    expect(
+      await probeCodexThreadIdleViaProxy(
+        threadId,
+        spawnMarkerScript,
+        2_000,
+        AbortSignal.abort(),
+      ),
+    ).toBe(false);
+    expect(
+      await queueCodexWakeMessage(
+        threadId,
+        "hello",
+        spawnMarkerScript,
+        2_000,
+        AbortSignal.abort(),
+      ),
+    ).toBe(false);
+    await expect(readFile(markerPath, "utf8")).rejects.toThrow();
+
+    const readyPath = path.join(stateDir, "resistant-ready.txt");
+    const resistantScript = path.join(stateDir, "mock-codex-resistant.mjs");
+    await writeFile(
+      resistantScript,
+      [
+        "#!/usr/bin/env node",
+        `import { writeFileSync } from "node:fs";`,
+        `process.on("SIGTERM", () => {});`,
+        `writeFileSync(${JSON.stringify(readyPath)}, \`\${process.pid}:\${process.argv[2] ?? "none"}\`, "utf8");`,
+        `setTimeout(() => process.exit(0), 8000);`,
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+
+    await recordCodexSession({
+      stateDir,
+      codexPid: 9200,
+      codexStartToken: "tok-9200",
+      threadId,
+      consumeReservation: false,
+    });
+    const logger = createLogger("test-codex-child-join", {
+      SNAPPER_MCP_LOG_LEVEL: "error",
+    });
+
+    // 1. Default queueSender (`codex queue ...`) with real SIGTERM-resistant child:
+    let queueChildPid = 0;
+    const qWs = createFakeWsFactory();
+    const queueWorker = await startCodexWakeWorker({
+      env: bridgeEnv,
+      stateDir,
+      logger,
+      wsClientFactory: qWs.factory,
+      isPidAlive: () => true,
+      idleProbe: async () => true,
+      codexCommand: resistantScript,
+      killGraceMs: 60,
+      settleMs: 10,
+      pollMs: 50,
+    });
+    try {
+      qWs.emit(makeReviewRequest());
+      await waitFor(
+        async () => {
+          try {
+            const raw = await readFile(readyPath, "utf8");
+            if (!raw.endsWith(":queue")) return false;
+            queueChildPid = Number.parseInt(raw.split(":")[0] ?? "0", 10);
+            return queueChildPid > 0;
+          } catch {
+            return false;
+          }
+        },
+        { message: "SIGTERM-resistant queue child started" },
+      );
+      expect(defaultIsPidAlive(queueChildPid)).toBe(true);
+
+      await queueWorker.close();
+      expect(defaultIsPidAlive(queueChildPid)).toBe(false);
+    } finally {
+      if (queueChildPid > 0 && defaultIsPidAlive(queueChildPid)) {
+        process.kill(queueChildPid, "SIGKILL");
+      }
+    }
+
+    // 2. Default idleProbe (`codex app-server proxy`) with real SIGTERM-resistant child:
+    await rm(readyPath, { force: true });
+    let proxyChildPid = 0;
+    const pWs = createFakeWsFactory();
+    const proxyWorker = await startCodexWakeWorker({
+      env: bridgeEnv,
+      stateDir,
+      logger,
+      wsClientFactory: pWs.factory,
+      isPidAlive: () => true,
+      codexCommand: resistantScript,
+      killGraceMs: 60,
+      settleMs: 10,
+      pollMs: 50,
+    });
+    try {
+      pWs.emit(
+        makeReviewRequest({
+          sequence_id: 2,
+          public_id: "0192f000-0000-7000-8000-eeeeeeeeeeef",
+        }),
+      );
+      await waitFor(
+        async () => {
+          try {
+            const raw = await readFile(readyPath, "utf8");
+            if (!raw.endsWith(":app-server")) return false;
+            proxyChildPid = Number.parseInt(raw.split(":")[0] ?? "0", 10);
+            return proxyChildPid > 0;
+          } catch {
+            return false;
+          }
+        },
+        { message: "SIGTERM-resistant proxy child started" },
+      );
+      expect(defaultIsPidAlive(proxyChildPid)).toBe(true);
+
+      await proxyWorker.close();
+      expect(defaultIsPidAlive(proxyChildPid)).toBe(false);
+    } finally {
+      if (proxyChildPid > 0 && defaultIsPidAlive(proxyChildPid)) {
+        process.kill(proxyChildPid, "SIGKILL");
+      }
+    }
   });
 });
 

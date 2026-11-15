@@ -7,7 +7,7 @@
  * written to stdout so MCP JSON-RPC framing stays pure.
  */
 
-import { execFile, spawn } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import net from "node:net";
 import path from "node:path";
@@ -67,6 +67,8 @@ const DEFAULT_WAKE_TOPICS: readonly string[] = [
 ];
 const AUTH_ME_TIMEOUT_MS = 10_000;
 const AI_REVIEW_FANOUT_AFTER_MS = 30_000;
+const DEFAULT_CHILD_KILL_GRACE_MS = 250;
+const MAX_SUBPROCESS_STDOUT_BYTES = 64 * 1024;
 const CANONICAL_UUID_REGEX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export const AGY_HELPER_ENV = "SNAPPER_AGY_HELPER";
@@ -288,6 +290,79 @@ export function resolveSubprocessTarget(
   return { file: candidate, args: [...args] };
 }
 
+interface ManagedChild {
+  readonly child: ChildProcess;
+  readonly exited: Promise<void>;
+  readonly terminate: (killGraceMs?: number) => Promise<void>;
+}
+
+function registerManagedChild(
+  child: ChildProcess,
+  registry?: Set<ManagedChild>,
+): ManagedChild {
+  let done = false;
+  let onSettled: (() => void) | null = null;
+  const exited = new Promise<void>((resolve) => {
+    const markDone = (): void => {
+      if (done) return;
+      done = true;
+      onSettled?.();
+      resolve();
+    };
+    child.once("close", markDone);
+    child.once("error", () => {
+      if (child.pid === undefined) {
+        markDone();
+      }
+    });
+  });
+
+  let terminatePromise: Promise<void> | null = null;
+  const terminate = (
+    killGraceMs = DEFAULT_CHILD_KILL_GRACE_MS,
+  ): Promise<void> => {
+    if (done) {
+      return Promise.resolve();
+    }
+    terminatePromise ??= (async () => {
+      child.kill("SIGTERM");
+      let killTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+        killTimer = null;
+        if (!done) {
+          child.kill("SIGKILL");
+          child.stdin?.destroy();
+          child.stdout?.destroy();
+        }
+      }, killGraceMs);
+      killTimer.unref();
+      try {
+        await exited;
+      } finally {
+        if (killTimer !== null) {
+          clearTimeout(killTimer);
+        }
+      }
+    })();
+    return terminatePromise;
+  };
+
+  const managed: ManagedChild = { child, exited, terminate };
+  if (registry !== undefined) {
+    registry.add(managed);
+    onSettled = () => {
+      registry.delete(managed);
+    };
+  }
+  return managed;
+}
+
+/**
+ * Wraps a spawned Codex proxy child's stdin/stdout pipes as a single `Duplex`
+ * stream for `ws`. Stream write/read errors are intentionally absorbed and
+ * mapped to completion/EOF because `probeCodexThreadIdleViaProxy` bounds probe
+ * lifetime via its own timer, abort signal, and `ChildProcess` exit join; do
+ * not reuse this helper where callers require stream-level write errors.
+ */
 function createChildProcessDuplex(
   childStdin: NodeJS.WritableStream,
   childStdout: NodeJS.ReadableStream,
@@ -322,16 +397,56 @@ function createChildProcessDuplex(
   return duplex;
 }
 
-export async function probeCodexThreadIdleViaProxy(
+function parseCodexProxyFrame(
+  raw: WebSocket.RawData,
   threadId: string,
-  codexCommand?: string,
-  timeoutMs = 5_000,
-  signal?: AbortSignal,
-): Promise<boolean> {
-  if (signal?.aborted) {
+):
+  | { readonly action: "send_thread_read" }
+  | { readonly action: "done"; readonly idle: boolean }
+  | { readonly action: "ignore" } {
+  const text =
+    typeof raw === "string"
+      ? raw
+      : Buffer.isBuffer(raw)
+        ? raw.toString("utf8")
+        : Buffer.from(raw as ArrayBuffer).toString("utf8");
+  const msg = JSON.parse(text) as {
+    readonly id?: unknown;
+    readonly result?: unknown;
+    readonly error?: unknown;
+  };
+  if (msg.id === 1 && msg.result !== undefined && msg.error === undefined) {
+    return { action: "send_thread_read" };
+  }
+  if (msg.id === 2) {
+    const thread = (
+      msg.result as {
+        readonly thread?: {
+          readonly id?: unknown;
+          readonly status?: { readonly type?: unknown };
+        };
+      } | undefined
+    )?.thread;
+    return {
+      action: "done",
+      idle: thread?.id === threadId && thread?.status?.type === "idle",
+    };
+  }
+  return { action: "ignore" };
+}
+
+async function probeCodexThreadIdleInternal(params: {
+  readonly threadId: string;
+  readonly codexCommand?: string;
+  readonly timeoutMs: number;
+  readonly signal?: AbortSignal;
+  readonly killGraceMs: number;
+  readonly registry?: Set<ManagedChild>;
+}): Promise<boolean> {
+  if (params.signal?.aborted) {
     return false;
   }
-  const resolved = resolveSubprocessTarget(codexCommand ?? "codex", [
+  const resolved = resolveSubprocessTarget(params.codexCommand ?? "codex", [
     "app-server",
     "proxy",
   ]);
@@ -339,108 +454,179 @@ export async function probeCodexThreadIdleViaProxy(
     return false;
   }
 
-  return new Promise<boolean>((resolve) => {
-    let settled = false;
-    let onAbort: (() => void) | null = null;
-    const finish = (idle: boolean): void => {
-      if (settled) return;
-      settled = true;
-      if (onAbort !== null) {
-        signal?.removeEventListener("abort", onAbort);
-      }
-      resolve(idle);
-    };
-
-    const child = spawn(resolved.file, resolved.args, {
-      stdio: ["pipe", "pipe", "ignore"],
-      windowsHide: true,
-    });
-    const timer = setTimeout(() => {
-      child.kill();
-      finish(false);
-    }, timeoutMs);
-
-    child.on("error", () => {
-      clearTimeout(timer);
-      finish(false);
-    });
-
-    const duplex = createChildProcessDuplex(child.stdin, child.stdout);
-    const ws = new WebSocket("ws://localhost/", {
-      createConnection: () => duplex as unknown as net.Socket,
-      maxPayload: 256 * 1024,
-    });
-
-    ws.on("error", () => {
-      clearTimeout(timer);
-      child.kill();
-      finish(false);
-    });
-
-    onAbort = () => {
-      clearTimeout(timer);
-      ws.terminate();
-      child.kill();
-      finish(false);
-    };
-    signal?.addEventListener("abort", onAbort, { once: true });
-
-    ws.once("open", () => {
-      ws.send(
-        JSON.stringify({
-          id: 1,
-          method: "initialize",
-          params: { clientInfo: { name: "snapper-mcp-wake", version: "1" } },
-        }),
-      );
-    });
-
-    ws.on("message", (raw: WebSocket.RawData) => {
-      try {
-        const text =
-          typeof raw === "string"
-            ? raw
-            : Buffer.isBuffer(raw)
-              ? raw.toString("utf8")
-              : Buffer.from(raw as ArrayBuffer).toString("utf8");
-        const msg = JSON.parse(text) as {
-          readonly id?: unknown;
-          readonly result?: unknown;
-          readonly error?: unknown;
-        };
-        if (msg.id === 1 && msg.result !== undefined && msg.error === undefined) {
-          ws.send(JSON.stringify({ method: "initialized", params: {} }));
-          ws.send(
-            JSON.stringify({
-              id: 2,
-              method: "thread/read",
-              params: { threadId, includeTurns: false },
-            }),
-          );
-          return;
-        }
-        if (msg.id === 2) {
-          clearTimeout(timer);
-          ws.terminate();
-          child.kill();
-          const thread = (
-            msg.result as {
-              readonly thread?: {
-                readonly id?: unknown;
-                readonly status?: { readonly type?: unknown };
-              };
-            } | undefined
-          )?.thread;
-          finish(thread?.id === threadId && thread?.status?.type === "idle");
-        }
-      } catch {
-        clearTimeout(timer);
-        ws.terminate();
-        child.kill();
-        finish(false);
-      }
-    });
+  const child = spawn(resolved.file, resolved.args, {
+    stdio: ["pipe", "pipe", "ignore"],
+    windowsHide: true,
   });
+  const managed = registerManagedChild(child, params.registry);
+  const duplex = createChildProcessDuplex(child.stdin, child.stdout);
+  const ws = new WebSocket("ws://localhost/", {
+    createConnection: () => duplex as unknown as net.Socket,
+    maxPayload: 256 * 1024,
+  });
+
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let onAbort: (() => void) | null = null;
+  try {
+    return await new Promise<boolean>((resolve) => {
+      let settled = false;
+      const finish = (idle: boolean): void => {
+        if (settled) return;
+        settled = true;
+        resolve(idle);
+      };
+
+      timer = setTimeout(() => {
+        finish(false);
+      }, params.timeoutMs);
+      timer.unref();
+
+      child.on("error", () => {
+        finish(false);
+      });
+      ws.on("error", () => {
+        finish(false);
+      });
+      ws.once("close", () => {
+        finish(false);
+      });
+
+      onAbort = () => {
+        finish(false);
+      };
+      params.signal?.addEventListener("abort", onAbort, { once: true });
+
+      ws.once("open", () => {
+        ws.send(
+          JSON.stringify({
+            id: 1,
+            method: "initialize",
+            params: { clientInfo: { name: "snapper-mcp-wake", version: "1" } },
+          }),
+        );
+      });
+
+      ws.on("message", (raw: WebSocket.RawData) => {
+        try {
+          const parsed = parseCodexProxyFrame(raw, params.threadId);
+          if (parsed.action === "send_thread_read") {
+            ws.send(JSON.stringify({ method: "initialized", params: {} }));
+            ws.send(
+              JSON.stringify({
+                id: 2,
+                method: "thread/read",
+                params: { threadId: params.threadId, includeTurns: false },
+              }),
+            );
+          } else if (parsed.action === "done") {
+            finish(parsed.idle);
+          }
+        } catch {
+          finish(false);
+        }
+      });
+    });
+  } finally {
+    if (timer !== null) {
+      clearTimeout(timer);
+    }
+    if (onAbort !== null) {
+      params.signal?.removeEventListener("abort", onAbort);
+    }
+    ws.terminate();
+    await managed.terminate(params.killGraceMs);
+  }
+}
+
+export async function probeCodexThreadIdleViaProxy(
+  threadId: string,
+  codexCommand?: string,
+  timeoutMs = 5_000,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  return probeCodexThreadIdleInternal({
+    threadId,
+    codexCommand,
+    timeoutMs,
+    signal,
+    killGraceMs: DEFAULT_CHILD_KILL_GRACE_MS,
+  });
+}
+
+async function queueCodexWakeMessageInternal(params: {
+  readonly threadId: string;
+  readonly message: string;
+  readonly codexCommand?: string;
+  readonly timeoutMs: number;
+  readonly signal?: AbortSignal;
+  readonly killGraceMs: number;
+  readonly registry?: Set<ManagedChild>;
+}): Promise<boolean> {
+  if (params.signal?.aborted) {
+    return false;
+  }
+  const resolved = resolveSubprocessTarget(params.codexCommand ?? "codex", [
+    "queue",
+    "--thread",
+    params.threadId,
+    "--resume",
+    "--message",
+    params.message,
+  ]);
+  if (resolved === null) {
+    return false;
+  }
+
+  const child = spawn(resolved.file, resolved.args, {
+    stdio: ["ignore", "pipe", "ignore"],
+    windowsHide: true,
+  });
+  child.on("error", () => undefined);
+  const managed = registerManagedChild(child, params.registry);
+
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+  child.stdout.on("data", (chunk: Buffer) => {
+    totalBytes += chunk.length;
+    if (totalBytes <= MAX_SUBPROCESS_STDOUT_BYTES) {
+      chunks.push(chunk);
+    }
+  });
+  child.stdout.on("error", () => undefined);
+
+  let cancelled = false;
+  const requestCancel = (): void => {
+    cancelled = true;
+    void managed.terminate(params.killGraceMs);
+  };
+
+  const timer = setTimeout(requestCancel, params.timeoutMs);
+  timer.unref();
+  params.signal?.addEventListener("abort", requestCancel, { once: true });
+
+  try {
+    await managed.exited;
+    if (cancelled) {
+      await managed.terminate(params.killGraceMs);
+    }
+  } finally {
+    clearTimeout(timer);
+    params.signal?.removeEventListener("abort", requestCancel);
+  }
+
+  if (
+    cancelled ||
+    totalBytes > MAX_SUBPROCESS_STDOUT_BYTES ||
+    child.exitCode !== 0 ||
+    child.signalCode !== null
+  ) {
+    return false;
+  }
+  const trimmed = Buffer.concat(chunks).toString("utf8").trim();
+  return (
+    trimmed.startsWith("Queued message ") &&
+    trimmed.includes(` for thread ${params.threadId}.`)
+  );
 }
 
 export async function queueCodexWakeMessage(
@@ -450,31 +636,14 @@ export async function queueCodexWakeMessage(
   timeoutMs = 5_000,
   signal?: AbortSignal,
 ): Promise<boolean> {
-  const resolved = resolveSubprocessTarget(codexCommand ?? "codex", [
-    "queue",
-    "--thread",
+  return queueCodexWakeMessageInternal({
     threadId,
-    "--resume",
-    "--message",
     message,
-  ]);
-  if (resolved === null) {
-    return false;
-  }
-  try {
-    const { stdout } = await execFileAsync(resolved.file, resolved.args, {
-      timeout: timeoutMs,
-      windowsHide: true,
-      signal,
-    });
-    const trimmed = stdout.trim();
-    return (
-      trimmed.startsWith("Queued message ") &&
-      trimmed.includes(` for thread ${threadId}.`)
-    );
-  } catch {
-    return false;
-  }
+    codexCommand,
+    timeoutMs,
+    signal,
+    killGraceMs: DEFAULT_CHILD_KILL_GRACE_MS,
+  });
 }
 
 export interface CodexWakeWorkerOptions {
@@ -484,6 +653,8 @@ export interface CodexWakeWorkerOptions {
   readonly wsClientFactory?: (opts: WsClientOptions) => WsClient;
   readonly idleProbe?: CodexIdleProbe;
   readonly queueSender?: CodexQueueSender;
+  readonly codexCommand?: string;
+  readonly killGraceMs?: number;
   readonly isPidAlive?: (pid: number) => boolean;
   readonly settleMs?: number;
   readonly pollMs?: number;
@@ -514,12 +685,31 @@ async function revalidateCodexReservation(params: {
 export async function startCodexWakeWorker(
   options: CodexWakeWorkerOptions,
 ): Promise<WakeWorkerHandle> {
+  const activeChildren = new Set<ManagedChild>();
+  const killGraceMs = options.killGraceMs ?? DEFAULT_CHILD_KILL_GRACE_MS;
   const idleProbe =
     options.idleProbe ??
-    ((id, sig) => probeCodexThreadIdleViaProxy(id, undefined, 5_000, sig));
+    ((id, sig) =>
+      probeCodexThreadIdleInternal({
+        threadId: id,
+        codexCommand: options.codexCommand,
+        timeoutMs: 5_000,
+        signal: sig,
+        killGraceMs,
+        registry: activeChildren,
+      }));
   const queueSender =
     options.queueSender ??
-    ((id, msg, sig) => queueCodexWakeMessage(id, msg, undefined, 5_000, sig));
+    ((id, msg, sig) =>
+      queueCodexWakeMessageInternal({
+        threadId: id,
+        message: msg,
+        codexCommand: options.codexCommand,
+        timeoutMs: 5_000,
+        signal: sig,
+        killGraceMs,
+        registry: activeChildren,
+      }));
   const isPidAlive = options.isPidAlive ?? defaultIsPidAlive;
   const settleMs = options.settleMs ?? 1_000;
   const pollMs = options.pollMs ?? 5_000;
@@ -646,6 +836,11 @@ export async function startCodexWakeWorker(
         stepTimer = null;
       }
       abortController.abort();
+      if (activeChildren.size > 0) {
+        await Promise.allSettled(
+          [...activeChildren].map((m) => m.terminate(killGraceMs)),
+        );
+      }
       await stream.close();
       if (pendingRecords.size > 0) {
         await Promise.allSettled([...pendingRecords]);
