@@ -96,8 +96,6 @@ jobs:
         run: npm pack --dry-run
 
       - name: Publish to npm (public, with provenance)
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --access public --provenance
 
       - name: Post-publish verification
