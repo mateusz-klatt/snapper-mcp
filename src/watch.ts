@@ -618,6 +618,7 @@ export async function watchMain(options: WatchOptions = {}): Promise<void> {
   let onceExpired = false;
   let expiryTimer: ReturnType<typeof setTimeout> | null = null;
   let exitCode: number | null = 1;
+  let cleanupError: unknown = null;
 
   try {
     try {
@@ -661,8 +662,13 @@ export async function watchMain(options: WatchOptions = {}): Promise<void> {
         }
       }
     } catch (err) {
-      if (sessionLock !== null) {
-        await sessionLock.release();
+      if (err instanceof StateRecoveryRequiredError && sessionLock !== null) {
+        try {
+          await sessionLock.release();
+        } catch (cleanupErr) {
+          const msg = cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr);
+          logger.error(`session lock release failed: ${msg}`);
+        }
       }
       if (!(err instanceof StateRecoveryRequiredError)) throw err;
       logger.error(err.message);
@@ -728,15 +734,23 @@ export async function watchMain(options: WatchOptions = {}): Promise<void> {
         watcherPid: selfPid,
         latchReason,
       }).catch((err: unknown) => {
-        if (err instanceof StateRecoveryRequiredError) {
-          logger.error(err.message);
-        }
+        cleanupError = err;
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`Kimi watcher finish update failed: ${msg}`);
       });
     }
-    if (sessionLock !== null) {
-      await sessionLock.release();
+    try {
+      if (sessionLock !== null) {
+        await sessionLock.release();
+      }
+    } catch (err) {
+      cleanupError = err;
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error(`session lock release failed: ${msg}`);
     }
   }
+
+  if (cleanupError !== null) throw new Error("watch cleanup failed", { cause: cleanupError });
 
   if (onceCompleted) {
     process.exit(KIMI_EXIT_ATTENTION);

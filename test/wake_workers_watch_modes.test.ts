@@ -1215,6 +1215,15 @@ describe("watchMain & extractProxyWakeArgs multi-client modes", () => {
       armPending: false,
       latchedReason: "failed",
     });
+    const setupRetryLock = await acquireSessionLock({
+      stateDir,
+      client: "kimi",
+      sessionKey: "sess-setup-error",
+      pid: 4001,
+      isPidAlive: () => true,
+    });
+    expect(setupRetryLock.acquired).toBe(true);
+    await setupRetryLock.release();
 
     const heldLock = await acquireSessionLock({
       stateDir,
