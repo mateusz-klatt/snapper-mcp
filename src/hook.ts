@@ -19,12 +19,15 @@ import {
   inspectParentProcess,
   type ParentProcessInspector,
 } from "./interactive.js";
+import { writeStderr } from "./logger.js";
 import {
   defaultConfigFilePath,
   defaultIsPidAlive,
   isWakeEnabled,
   readWakePreference,
   resolveStateDir,
+  StateLockContentionError,
+  StateRecoveryRequiredError,
 } from "./state_dir.js";
 import {
   clearKimiSession,
@@ -49,6 +52,7 @@ export interface HookOptions {
   readonly argv?: readonly string[];
   readonly stdin?: Readable | string;
   readonly stdout?: Pick<Writable, "write">;
+  readonly stderr?: Pick<Writable, "write">;
   readonly source?: NodeJS.ProcessEnv;
   readonly platform?: NodeJS.Platform;
   readonly inspector?: ParentProcessInspector;
@@ -622,7 +626,14 @@ export async function hookMain(options: HookOptions = {}): Promise<void> {
     if (output !== null && options.stdout !== undefined) {
       options.stdout.write(output);
     }
-  } catch {
-    // Hooks always fail open with zero blocking output.
+  } catch (err) {
+    if (err instanceof StateRecoveryRequiredError || err instanceof StateLockContentionError) {
+      const diagnostic = `[snapper-mcp hook] ${err.message}\n`;
+      if (options.stderr !== undefined) {
+        options.stderr.write(diagnostic);
+      } else {
+        writeStderr(diagnostic);
+      }
+    }
   }
 }

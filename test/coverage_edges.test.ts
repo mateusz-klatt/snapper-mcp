@@ -211,6 +211,16 @@ describe("state_dir & toml_edit edge cases", () => {
       isPidAlive: () => false,
     });
     expect(firstLock.acquired).toBe(true);
+    await expect(
+      acquireSessionLock({
+        stateDir: dir,
+        client: "kimi",
+        sessionKey: "s-corrupt",
+        pid: process.pid,
+        isPidAlive: (pid) => pid === process.pid,
+      }),
+    ).rejects.toThrow("QUIESCENT");
+    await firstLock.release();
     const recoveredLock = await acquireSessionLock({
       stateDir: dir,
       client: "kimi",
@@ -234,13 +244,20 @@ describe("state_dir & toml_edit edge cases", () => {
     await mkdir(runtimeDir, { recursive: true });
     await writeFile(path.join(runtimeDir, "sample.mutex"), "{corrupt", "utf8");
     await writeFile(path.join(runtimeDir, "sample.json"), "{corrupt", "utf8");
-    const val = await mutateLockedJsonFile({
-      stateDir: dir,
-      name: "sample",
-      initial: () => ({ n: 1 }),
-      mutate: (cur) => ({ next: { n: cur.n + 1 }, result: cur.n + 1 }),
+    const mutateSample = (): Promise<number> =>
+      mutateLockedJsonFile({
+        stateDir: dir,
+        name: "sample",
+        initial: () => ({ n: 1 }),
+        mutate: (cur) => ({ next: { n: cur.n + 1 }, result: cur.n + 1 }),
+      });
+    await expect(mutateSample()).rejects.toThrow("QUIESCENT");
+    await unlink(path.join(runtimeDir, "sample.mutex"));
+    await expect(mutateSample()).rejects.toMatchObject({
+      name: "StateDataRecoveryRequiredError",
     });
-    expect(val).toBe(2);
+    await unlink(path.join(runtimeDir, "sample.json"));
+    await expect(mutateSample()).resolves.toBe(2);
 
     await writeFile(
       path.join(runtimeDir, "expired.mutex"),
@@ -252,14 +269,25 @@ describe("state_dir & toml_edit edge cases", () => {
       }),
       "utf8",
     );
-    const expiredVal = await mutateLockedJsonFile({
-      stateDir: dir,
-      name: "expired",
-      isPidAlive: () => true,
-      initial: () => ({ n: 10 }),
-      mutate: (cur) => ({ next: { n: cur.n + 5 }, result: cur.n + 5 }),
+    let nowMs = Date.now();
+    const mutateExpired = (): Promise<number> =>
+      mutateLockedJsonFile({
+        stateDir: dir,
+        name: "expired",
+        isPidAlive: () => true,
+        initial: () => ({ n: 10 }),
+        mutate: (cur) => ({ next: { n: cur.n + 5 }, result: cur.n + 5 }),
+        nowMs: () => nowMs,
+        sleepMs: (ms) => {
+          nowMs += ms;
+          return Promise.resolve();
+        },
+      });
+    await expect(mutateExpired()).rejects.toMatchObject({
+      name: "StateLockContentionError",
     });
-    expect(expiredVal).toBe(15);
+    await unlink(path.join(runtimeDir, "expired.mutex"));
+    await expect(mutateExpired()).resolves.toBe(15);
 
     await writeFile(path.join(runtimeDir, "bad-rt.json"), "{corrupt", "utf8");
     expect(await readRuntimeJsonFile(dir, "bad-rt", () => ({ ok: true }))).toEqual({

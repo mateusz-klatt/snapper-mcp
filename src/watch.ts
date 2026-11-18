@@ -46,6 +46,7 @@ import {
   defaultIsPidAlive,
   readWakePreference,
   resolveStateDir,
+  StateRecoveryRequiredError,
   type SessionLockHandle,
 } from "./state_dir.js";
 import { TokenStore } from "./token_store.js";
@@ -612,93 +613,114 @@ export async function watchMain(options: WatchOptions = {}): Promise<void> {
 
   let sessionLock: SessionLockHandle | null = null;
   let kimiParentInfo: { readonly parentPid: number; readonly parentStartToken: string } | null = null;
-
-  if (args.client !== null) {
-    const pref = await readWakePreference(stateDir, args.client);
-    if (pref === "off") {
-      if (args.client === "kimi" && args.once) {
-        sink.write(`${KIMI_OUTCOME_LINES[KIMI_EXIT_DISABLED]}\n`);
-      }
-      process.exit(KIMI_EXIT_DISABLED);
-      return;
-    }
-
-    const sessionInfo = await deriveSessionKey(args.client, source, options);
-    sessionLock = await acquireSessionLock({
-      stateDir,
-      client: args.client,
-      sessionKey: sessionInfo.key,
-      pid: selfPid,
-      isPidAlive,
-    });
-    if (!sessionLock.acquired) {
-      if (args.client === "kimi" && args.once) {
-        sink.write(`${KIMI_OUTCOME_LINES[KIMI_EXIT_DUPLICATE]}\n`);
-      }
-      process.exit(KIMI_EXIT_DUPLICATE);
-      return;
-    }
-
-    if (args.client === "kimi" && args.once) {
-      kimiParentInfo = {
-        parentPid: sessionInfo.parentPid,
-        parentStartToken: sessionInfo.parentStartToken,
-      };
-      await claimKimiWatcherStart({
-        stateDir,
-        parentPid: sessionInfo.parentPid,
-        parentStartToken: sessionInfo.parentStartToken,
-        watcherPid: selfPid,
-      });
-    }
-  }
-
   let activeClient: WsClient | null = null;
   let onceCompleted = false;
   let onceExpired = false;
   let expiryTimer: ReturnType<typeof setTimeout> | null = null;
+  let exitCode: number | null = 1;
+  let cleanupError: unknown = null;
 
-  const setup = await buildWatchSetup({
-    args,
-    options,
-    sink,
-    env,
-    logger,
-    onOnceEmitted: () => {
-      onceCompleted = true;
-      if (activeClient !== null) {
+  try {
+    try {
+      if (args.client !== null) {
+        const pref = await readWakePreference(stateDir, args.client);
+        if (pref === "off") {
+          if (args.client === "kimi" && args.once) {
+            sink.write(`${KIMI_OUTCOME_LINES[KIMI_EXIT_DISABLED]}\n`);
+          }
+          process.exit(KIMI_EXIT_DISABLED);
+          return;
+        }
+
+        const sessionInfo = await deriveSessionKey(args.client, source, options);
+        sessionLock = await acquireSessionLock({
+          stateDir,
+          client: args.client,
+          sessionKey: sessionInfo.key,
+          pid: selfPid,
+          isPidAlive,
+        });
+        if (!sessionLock.acquired) {
+          if (args.client === "kimi" && args.once) {
+            sink.write(`${KIMI_OUTCOME_LINES[KIMI_EXIT_DUPLICATE]}\n`);
+          }
+          process.exit(KIMI_EXIT_DUPLICATE);
+          return;
+        }
+
+        if (args.client === "kimi" && args.once) {
+          await claimKimiWatcherStart({
+            stateDir,
+            parentPid: sessionInfo.parentPid,
+            parentStartToken: sessionInfo.parentStartToken,
+            watcherPid: selfPid,
+          });
+          kimiParentInfo = {
+            parentPid: sessionInfo.parentPid,
+            parentStartToken: sessionInfo.parentStartToken,
+          };
+        }
+      }
+    } catch (err) {
+      if (err instanceof StateRecoveryRequiredError && sessionLock !== null) {
+        try {
+          await sessionLock.release();
+        } catch (cleanupErr) {
+          const msg = cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr);
+          logger.error(`session lock release failed: ${msg}`);
+        }
+      }
+      if (!(err instanceof StateRecoveryRequiredError)) throw err;
+      logger.error(err.message);
+      if (args.client === "kimi" && args.once) {
+        sink.write(`${KIMI_OUTCOME_LINES[KIMI_EXIT_FAILED]}\n`);
+      }
+      process.exit(KIMI_EXIT_FAILED);
+      return;
+    }
+
+    const setup = await buildWatchSetup({
+      args,
+      options,
+      sink,
+      env,
+      logger,
+      onOnceEmitted: () => {
+        onceCompleted = true;
+        if (activeClient !== null) {
+          void activeClient.close();
+        }
+      },
+    });
+    try {
+      activeClient = setup.client;
+      if (onceCompleted) {
         void activeClient.close();
       }
-    },
-  });
-  activeClient = setup.client;
-  if (onceCompleted) {
-    void activeClient.close();
-  }
 
-  if (args.once && !onceCompleted) {
-    const lifetimeMs = options.onceLifetimeMs ?? DEFAULT_ONCE_LIFETIME_MS;
-    expiryTimer = setTimeout(() => {
-      if (!onceCompleted) {
-        onceExpired = true;
-        void setup.client.close();
+      if (args.once && !onceCompleted) {
+        const lifetimeMs = options.onceLifetimeMs ?? DEFAULT_ONCE_LIFETIME_MS;
+        expiryTimer = setTimeout(() => {
+          if (!onceCompleted) {
+            onceExpired = true;
+            void setup.client.close();
+          }
+        }, lifetimeMs);
+        if (lifetimeMs >= 60_000) {
+          expiryTimer.unref();
+        }
       }
-    }, lifetimeMs);
-    if (lifetimeMs >= 60_000) {
-      expiryTimer.unref();
+
+      const signalSource = resolveSignalSource(options.signalSource);
+      const shouldInstall = options.install ?? true;
+
+      logger.info(`subscribing to topics: ${args.topics.join(", ")}`);
+      exitCode = await runWatchSession(setup.client, logger, signalSource, shouldInstall);
+    } finally {
+      if (expiryTimer !== null) clearTimeout(expiryTimer);
+      setup.dispose();
     }
-  }
-
-  const signalSource = resolveSignalSource(options.signalSource);
-  const shouldInstall = options.install ?? true;
-
-  logger.info(`subscribing to topics: ${args.topics.join(", ")}`);
-  let exitCode: number | null = 1;
-  try {
-    exitCode = await runWatchSession(setup.client, logger, signalSource, shouldInstall);
   } finally {
-    if (expiryTimer !== null) clearTimeout(expiryTimer);
-    setup.dispose();
     if (kimiParentInfo !== null) {
       const latchReason = onceExpired
         ? "expired"
@@ -711,12 +733,24 @@ export async function watchMain(options: WatchOptions = {}): Promise<void> {
         parentStartToken: kimiParentInfo.parentStartToken,
         watcherPid: selfPid,
         latchReason,
-      }).catch(() => undefined);
+      }).catch((err: unknown) => {
+        cleanupError = err;
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`Kimi watcher finish update failed: ${msg}`);
+      });
     }
-    if (sessionLock !== null) {
-      await sessionLock.release();
+    try {
+      if (sessionLock !== null) {
+        await sessionLock.release();
+      }
+    } catch (err) {
+      cleanupError = err;
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error(`session lock release failed: ${msg}`);
     }
   }
+
+  if (cleanupError !== null) throw new Error("watch cleanup failed", { cause: cleanupError });
 
   if (onceCompleted) {
     process.exit(KIMI_EXIT_ATTENTION);

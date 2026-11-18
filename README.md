@@ -134,6 +134,48 @@ explicitly passed. Interactive wake hooks verify terminal attachment and client
 argument grammar before arming so non-interactive print runs (`-p`, `--print`,
 `codex exec`) never emit extra lines or continuation turns.
 
+### Lock safety and quiescent recovery
+
+Session and runtime state locks are published as complete payloads using atomic
+hard-link creation. A valid live holder is never evicted because of its age.
+Malformed, incomplete, and dead-holder lock files are never reclaimed online:
+the protected mutation does not run, and a diagnostic containing the exact lock
+path and recovery instruction is written to stderr. Hook exit behavior and
+stdout protocols remain unchanged.
+
+Runtime data is initialized only when its file is absent. Existing empty or
+unparseable data raises a distinct recovery error and is never replaced with
+default state; read and permission errors propagate. Recovery diagnostics never
+include the lock or data payload. PID-only liveness can mistake a reused PID for
+a live holder, causing persistent duplicate or contention outcomes. This bounded
+protocol does not reclaim by age or infer process identity; such artifacts
+require operator investigation and quiescent recovery rather than automatic
+repair.
+
+Recovery requires a quiescent state. Stop every `snapper-mcp` watcher, MCP
+server, wake worker, and CLI hook, verify that no writer is still active, then
+move the reported lock or data file aside for diagnosis before restarting. Never remove
+a lock file while any writer is active. Orphaned `*.tmp.*` publication files are
+also safe to remove only while quiescent. Hard-link creation requires filesystem
+support; unsupported filesystems fail closed instead of selecting an unsafe
+fallback.
+
+A failed wake-state update is logged and dropped rather than retried. This is an
+availability limitation that requires operator attention, not a successful
+update or a safe automatic recovery.
+
+If finish persistence or lock release fails after otherwise normal completion,
+`watch` exits nonzero with `watch cleanup failed` instead of implying clean
+completion. The session outcome line describes the operation, while the cleanup
+diagnostic describes incomplete finalization. When an operational exception is
+already in flight, that original exception propagates and cleanup failures are
+logged separately.
+
+A rolling upgrade with mixed versions is not supported. Older writers can still
+reclaim malformed or aged locks. Quiesce all old writers and hooks before
+starting the patched version, and keep them stopped while the new version is
+active.
+
 ### Option 3 — Direct CLI / custom hosts
 
 ```bash
