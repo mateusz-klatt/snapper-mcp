@@ -613,106 +613,108 @@ export async function watchMain(options: WatchOptions = {}): Promise<void> {
 
   let sessionLock: SessionLockHandle | null = null;
   let kimiParentInfo: { readonly parentPid: number; readonly parentStartToken: string } | null = null;
-
-  try {
-    if (args.client !== null) {
-      const pref = await readWakePreference(stateDir, args.client);
-      if (pref === "off") {
-        if (args.client === "kimi" && args.once) {
-          sink.write(`${KIMI_OUTCOME_LINES[KIMI_EXIT_DISABLED]}\n`);
-        }
-        process.exit(KIMI_EXIT_DISABLED);
-        return;
-      }
-
-      const sessionInfo = await deriveSessionKey(args.client, source, options);
-      sessionLock = await acquireSessionLock({
-        stateDir,
-        client: args.client,
-        sessionKey: sessionInfo.key,
-        pid: selfPid,
-        isPidAlive,
-      });
-      if (!sessionLock.acquired) {
-        if (args.client === "kimi" && args.once) {
-          sink.write(`${KIMI_OUTCOME_LINES[KIMI_EXIT_DUPLICATE]}\n`);
-        }
-        process.exit(KIMI_EXIT_DUPLICATE);
-        return;
-      }
-
-      if (args.client === "kimi" && args.once) {
-        kimiParentInfo = {
-          parentPid: sessionInfo.parentPid,
-          parentStartToken: sessionInfo.parentStartToken,
-        };
-        await claimKimiWatcherStart({
-          stateDir,
-          parentPid: sessionInfo.parentPid,
-          parentStartToken: sessionInfo.parentStartToken,
-          watcherPid: selfPid,
-        });
-      }
-    }
-  } catch (err) {
-    if (!(err instanceof StateRecoveryRequiredError)) throw err;
-    logger.error(err.message);
-    if (sessionLock !== null) {
-      await sessionLock.release();
-    }
-    if (args.client === "kimi" && args.once) {
-      sink.write(`${KIMI_OUTCOME_LINES[KIMI_EXIT_FAILED]}\n`);
-    }
-    process.exit(KIMI_EXIT_FAILED);
-    return;
-  }
-
   let activeClient: WsClient | null = null;
   let onceCompleted = false;
   let onceExpired = false;
   let expiryTimer: ReturnType<typeof setTimeout> | null = null;
+  let exitCode: number | null = 1;
 
-  const setup = await buildWatchSetup({
-    args,
-    options,
-    sink,
-    env,
-    logger,
-    onOnceEmitted: () => {
-      onceCompleted = true;
-      if (activeClient !== null) {
+  try {
+    try {
+      if (args.client !== null) {
+        const pref = await readWakePreference(stateDir, args.client);
+        if (pref === "off") {
+          if (args.client === "kimi" && args.once) {
+            sink.write(`${KIMI_OUTCOME_LINES[KIMI_EXIT_DISABLED]}\n`);
+          }
+          process.exit(KIMI_EXIT_DISABLED);
+          return;
+        }
+
+        const sessionInfo = await deriveSessionKey(args.client, source, options);
+        sessionLock = await acquireSessionLock({
+          stateDir,
+          client: args.client,
+          sessionKey: sessionInfo.key,
+          pid: selfPid,
+          isPidAlive,
+        });
+        if (!sessionLock.acquired) {
+          if (args.client === "kimi" && args.once) {
+            sink.write(`${KIMI_OUTCOME_LINES[KIMI_EXIT_DUPLICATE]}\n`);
+          }
+          process.exit(KIMI_EXIT_DUPLICATE);
+          return;
+        }
+
+        if (args.client === "kimi" && args.once) {
+          await claimKimiWatcherStart({
+            stateDir,
+            parentPid: sessionInfo.parentPid,
+            parentStartToken: sessionInfo.parentStartToken,
+            watcherPid: selfPid,
+          });
+          kimiParentInfo = {
+            parentPid: sessionInfo.parentPid,
+            parentStartToken: sessionInfo.parentStartToken,
+          };
+        }
+      }
+    } catch (err) {
+      if (sessionLock !== null) {
+        await sessionLock.release();
+      }
+      if (!(err instanceof StateRecoveryRequiredError)) throw err;
+      logger.error(err.message);
+      if (args.client === "kimi" && args.once) {
+        sink.write(`${KIMI_OUTCOME_LINES[KIMI_EXIT_FAILED]}\n`);
+      }
+      process.exit(KIMI_EXIT_FAILED);
+      return;
+    }
+
+    const setup = await buildWatchSetup({
+      args,
+      options,
+      sink,
+      env,
+      logger,
+      onOnceEmitted: () => {
+        onceCompleted = true;
+        if (activeClient !== null) {
+          void activeClient.close();
+        }
+      },
+    });
+    try {
+      activeClient = setup.client;
+      if (onceCompleted) {
         void activeClient.close();
       }
-    },
-  });
-  activeClient = setup.client;
-  if (onceCompleted) {
-    void activeClient.close();
-  }
 
-  if (args.once && !onceCompleted) {
-    const lifetimeMs = options.onceLifetimeMs ?? DEFAULT_ONCE_LIFETIME_MS;
-    expiryTimer = setTimeout(() => {
-      if (!onceCompleted) {
-        onceExpired = true;
-        void setup.client.close();
+      if (args.once && !onceCompleted) {
+        const lifetimeMs = options.onceLifetimeMs ?? DEFAULT_ONCE_LIFETIME_MS;
+        expiryTimer = setTimeout(() => {
+          if (!onceCompleted) {
+            onceExpired = true;
+            void setup.client.close();
+          }
+        }, lifetimeMs);
+        if (lifetimeMs >= 60_000) {
+          expiryTimer.unref();
+        }
       }
-    }, lifetimeMs);
-    if (lifetimeMs >= 60_000) {
-      expiryTimer.unref();
+
+      const signalSource = resolveSignalSource(options.signalSource);
+      const shouldInstall = options.install ?? true;
+
+      logger.info(`subscribing to topics: ${args.topics.join(", ")}`);
+      exitCode = await runWatchSession(setup.client, logger, signalSource, shouldInstall);
+    } finally {
+      if (expiryTimer !== null) clearTimeout(expiryTimer);
+      setup.dispose();
     }
-  }
-
-  const signalSource = resolveSignalSource(options.signalSource);
-  const shouldInstall = options.install ?? true;
-
-  logger.info(`subscribing to topics: ${args.topics.join(", ")}`);
-  let exitCode: number | null = 1;
-  try {
-    exitCode = await runWatchSession(setup.client, logger, signalSource, shouldInstall);
   } finally {
-    if (expiryTimer !== null) clearTimeout(expiryTimer);
-    setup.dispose();
     if (kimiParentInfo !== null) {
       const latchReason = onceExpired
         ? "expired"

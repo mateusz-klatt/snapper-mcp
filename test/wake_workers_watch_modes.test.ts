@@ -1159,7 +1159,62 @@ describe("watchMain & extractProxyWakeArgs multi-client modes", () => {
     expect((contentionError as Error).message).not.toContain("move the lock file aside");
     expect((contentionError as Error).message).not.toContain("QUIESCENT");
     expect(contentionLines).toEqual([]);
+    const contentionSessionPath = path.join(
+      stateDir,
+      "locks",
+      `kimi-${sha256Hex("sess-contention").slice(0, 24)}.lock`,
+    );
+    await expect(readFile(contentionSessionPath, "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
     await rm(contentionPath, { force: true });
+    const retryLock = await acquireSessionLock({
+      stateDir,
+      client: "kimi",
+      sessionKey: "sess-contention",
+      pid: 4001,
+      isPidAlive: () => true,
+    });
+    expect(retryLock.acquired).toBe(true);
+    await retryLock.release();
+
+    const setupLines: string[] = [];
+    const setupError = await watchMain({
+      argv: ["--client", "kimi", "--once"],
+      source: baseSource,
+      sessionKey: "sess-setup-error",
+      pid: 4001,
+      isPidAlive: () => true,
+      wsClientFactory: () => {
+        throw new Error("injected setup failure");
+      },
+      stdout: { write: (s: string) => setupLines.push(s) },
+      install: false,
+    }).catch((err: unknown) => err);
+    expect(setupError).toBeInstanceOf(Error);
+    expect((setupError as Error).message).toBe("injected setup failure");
+    expect(setupLines).toEqual([]);
+    const setupSessionPath = path.join(
+      stateDir,
+      "locks",
+      `kimi-${sha256Hex("sess-setup-error").slice(0, 24)}.lock`,
+    );
+    await expect(readFile(setupSessionPath, "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    const finishState = JSON.parse(
+      await readFile(path.join(stateDir, "runtime", "kimi-wake.json"), "utf8"),
+    ) as {
+      readonly sessions: Record<
+        string,
+        { readonly watcherPid: number | null; readonly armPending: boolean; readonly latchedReason: string | null }
+      >;
+    };
+    expect(finishState.sessions[`${process.ppid}:0`]).toMatchObject({
+      watcherPid: null,
+      armPending: false,
+      latchedReason: "failed",
+    });
 
     const heldLock = await acquireSessionLock({
       stateDir,

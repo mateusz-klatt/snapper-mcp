@@ -146,7 +146,11 @@ stdout protocols remain unchanged.
 Runtime data is initialized only when its file is absent. Existing empty or
 unparseable data raises a distinct recovery error and is never replaced with
 default state; read and permission errors propagate. Recovery diagnostics never
-include the lock or data payload.
+include the lock or data payload. PID-only liveness can mistake a reused PID for
+a live holder, causing persistent duplicate or contention outcomes. This bounded
+protocol does not reclaim by age or infer process identity; such artifacts
+require operator investigation and quiescent recovery rather than automatic
+repair.
 
 Recovery requires a quiescent state. Stop every `snapper-mcp` watcher, MCP
 server, wake worker, and CLI hook, verify that no writer is still active, then
