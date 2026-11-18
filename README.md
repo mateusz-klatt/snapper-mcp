@@ -134,6 +134,25 @@ explicitly passed. Interactive wake hooks verify terminal attachment and client
 argument grammar before arming so non-interactive print runs (`-p`, `--print`,
 `codex exec`) never emit extra lines or continuation turns.
 
+### Lock safety and quiescent recovery
+
+Session and runtime state locks are published as complete payloads using atomic
+hard-link creation. A valid live holder is never evicted because of its age.
+Malformed, incomplete, and dead-holder lock files are never reclaimed online:
+the protected mutation does not run, and a diagnostic containing the exact lock
+path and recovery instruction is written to stderr. Hook exit behavior and
+stdout protocols remain unchanged.
+
+Recovery requires a quiescent state. Stop every `snapper-mcp` watcher, MCP
+server, wake worker, and CLI hook, verify that no writer is still active, then
+move the reported lock file aside for diagnosis before restarting. Never remove
+a lock file while any writer is active.
+
+A rolling upgrade with mixed versions is not supported. Older writers can still
+reclaim malformed or aged locks. Quiesce all old writers and hooks before
+starting the patched version, and keep them stopped while the new version is
+active.
+
 ### Option 3 — Direct CLI / custom hosts
 
 ```bash

@@ -117,14 +117,15 @@ describe("state_dir", () => {
     await expect(writeFileAtomic(linkPath, "bad")).rejects.toThrow(UnsafeFileTargetError);
   });
 
-  it("acquires session locks exclusively and recovers stale locks", async () => {
+  it("acquires session locks exclusively and requires quiescent stale recovery", async () => {
     const stateDir = await makeTemp();
     const aliveSet = new Set<number>([101]);
+    const sessionKey = "101:abc";
 
     const first = await acquireSessionLock({
       stateDir,
       client: "grok",
-      sessionKey: "101:abc",
+      sessionKey,
       pid: 101,
       isPidAlive: (p) => aliveSet.has(p),
     });
@@ -133,7 +134,7 @@ describe("state_dir", () => {
     const duplicate = await acquireSessionLock({
       stateDir,
       client: "grok",
-      sessionKey: "101:abc",
+      sessionKey,
       pid: 102,
       isPidAlive: (p) => aliveSet.has(p),
     });
@@ -142,32 +143,54 @@ describe("state_dir", () => {
 
     aliveSet.delete(101);
     aliveSet.add(103);
+    await expect(
+      acquireSessionLock({
+        stateDir,
+        client: "grok",
+        sessionKey,
+        pid: 103,
+        isPidAlive: (p) => aliveSet.has(p),
+      }),
+    ).rejects.toThrow("QUIESCENT");
+
+    const lockPath = path.join(
+      stateDir,
+      "locks",
+      `grok-${sha256Hex(sessionKey).slice(0, 24)}.lock`,
+    );
+    await first.release();
+    await rm(lockPath, { force: true });
     const recovered = await acquireSessionLock({
       stateDir,
       client: "grok",
-      sessionKey: "101:abc",
+      sessionKey,
       pid: 103,
       isPidAlive: (p) => aliveSet.has(p),
     });
     expect(recovered.acquired).toBe(true);
-    await first.release();
     await recovered.release();
   });
 
-  it("mutates locked runtime JSON files and handles corrupted or stale mutexes", async () => {
+  it("requires quiescent mutex recovery before mutating corrupted runtime JSON", async () => {
     const stateDir = await makeTemp();
     const runtimeDir = path.join(stateDir, "runtime");
     await ensurePrivateDir(runtimeDir);
-    await writeFile(path.join(runtimeDir, "sample.mutex"), "{not-json", "utf8");
+    const mutexPath = path.join(runtimeDir, "sample.mutex");
+    await writeFile(mutexPath, "{not-json", "utf8");
     await writeFile(path.join(runtimeDir, "sample.json"), "{corrupt", "utf8");
 
-    const val = await mutateLockedJsonFile({
-      stateDir,
-      name: "sample",
-      initial: () => ({ count: 0 }),
-      mutate: (cur) => ({ next: { count: cur.count + 5 }, result: cur.count + 5 }),
-    });
-    expect(val).toBe(5);
+    const mutate = (): Promise<number> =>
+      mutateLockedJsonFile({
+        stateDir,
+        name: "sample",
+        initial: () => ({ count: 0 }),
+        mutate: (cur) => ({ next: { count: cur.count + 5 }, result: cur.count + 5 }),
+      });
+    await expect(mutate()).rejects.toThrow("QUIESCENT");
+    expect(await readTextIfPresent(mutexPath)).toBe("{not-json");
+
+    await rm(mutexPath, { force: true });
+    await expect(mutate()).resolves.toBe(5);
     expect(await readRuntimeJsonFile(stateDir, "sample", () => ({ count: 0 }))).toEqual({
       count: 5,
     });

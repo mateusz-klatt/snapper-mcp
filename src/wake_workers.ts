@@ -830,7 +830,10 @@ export async function startCodexWakeWorker(
         .then(() => {
           scheduleStep(settleMs);
         })
-        .catch(() => undefined)
+        .catch((err: unknown) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          options.logger.warn(`codex wake state update failed: ${msg}`);
+        })
         .finally(() => {
           pendingRecords.delete(rec);
         });
@@ -1060,7 +1063,10 @@ async function runAntigravityLauncher(
         agyPid: check.parent.pid,
         agyStartToken: check.parent.startToken,
         conversationId: convId,
-      }).catch(() => undefined);
+      }).catch((err: unknown) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        options.logger.warn(`antigravity failure latch failed: ${msg}`);
+      });
     }
     return 1;
   };

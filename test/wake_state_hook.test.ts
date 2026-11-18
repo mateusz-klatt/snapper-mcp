@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
@@ -655,6 +655,35 @@ describe("hookMain client handlers", () => {
       stdin: JSON.stringify({ session_id: "kimi-s1" }),
       inspector: () => Promise.resolve(makeParent("kimi", ["kimi"])),
     });
+  });
+
+  it("reports lock recovery on stderr without mutating state or corrupting stdout", async () => {
+    const runtimeDir = path.join(stateDir, "runtime");
+    const mutexPath = path.join(runtimeDir, "kimi-wake.mutex");
+    const dataPath = path.join(runtimeDir, "kimi-wake.json");
+    await mkdir(runtimeDir, { recursive: true });
+    await writeFile(mutexPath, "malformed-lock-secret", "utf8");
+    await writeFile(dataPath, "sentinel-state-secret", "utf8");
+    const stdout = new OutputBuffer();
+    const stderr = new OutputBuffer();
+
+    await hookMain({
+      argv: ["--client", "kimi", "--event", "SessionStart"],
+      source: env,
+      platform: "linux",
+      stdin: JSON.stringify({ session_id: "kimi-lock-recovery" }),
+      stdout,
+      stderr,
+      inspector: () => Promise.resolve(makeParent("kimi", ["kimi"])),
+    });
+
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toContain(mutexPath);
+    expect(stderr.text()).toContain("QUIESCENT");
+    expect(stderr.text()).not.toContain("malformed-lock-secret");
+    expect(stderr.text()).not.toContain("sentinel-state-secret");
+    await expect(readFile(mutexPath, "utf8")).resolves.toBe("malformed-lock-secret");
+    await expect(readFile(dataPath, "utf8")).resolves.toBe("sentinel-state-secret");
   });
 
   it("handles Cursor stop hook follow-up consumption and loop_count guard", async () => {

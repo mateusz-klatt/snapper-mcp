@@ -46,6 +46,7 @@ import {
   defaultIsPidAlive,
   readWakePreference,
   resolveStateDir,
+  StateLockRecoveryRequiredError,
   type SessionLockHandle,
 } from "./state_dir.js";
 import { TokenStore } from "./token_store.js";
@@ -613,44 +614,57 @@ export async function watchMain(options: WatchOptions = {}): Promise<void> {
   let sessionLock: SessionLockHandle | null = null;
   let kimiParentInfo: { readonly parentPid: number; readonly parentStartToken: string } | null = null;
 
-  if (args.client !== null) {
-    const pref = await readWakePreference(stateDir, args.client);
-    if (pref === "off") {
-      if (args.client === "kimi" && args.once) {
-        sink.write(`${KIMI_OUTCOME_LINES[KIMI_EXIT_DISABLED]}\n`);
+  try {
+    if (args.client !== null) {
+      const pref = await readWakePreference(stateDir, args.client);
+      if (pref === "off") {
+        if (args.client === "kimi" && args.once) {
+          sink.write(`${KIMI_OUTCOME_LINES[KIMI_EXIT_DISABLED]}\n`);
+        }
+        process.exit(KIMI_EXIT_DISABLED);
+        return;
       }
-      process.exit(KIMI_EXIT_DISABLED);
-      return;
-    }
 
-    const sessionInfo = await deriveSessionKey(args.client, source, options);
-    sessionLock = await acquireSessionLock({
-      stateDir,
-      client: args.client,
-      sessionKey: sessionInfo.key,
-      pid: selfPid,
-      isPidAlive,
-    });
-    if (!sessionLock.acquired) {
-      if (args.client === "kimi" && args.once) {
-        sink.write(`${KIMI_OUTCOME_LINES[KIMI_EXIT_DUPLICATE]}\n`);
-      }
-      process.exit(KIMI_EXIT_DUPLICATE);
-      return;
-    }
-
-    if (args.client === "kimi" && args.once) {
-      kimiParentInfo = {
-        parentPid: sessionInfo.parentPid,
-        parentStartToken: sessionInfo.parentStartToken,
-      };
-      await claimKimiWatcherStart({
+      const sessionInfo = await deriveSessionKey(args.client, source, options);
+      sessionLock = await acquireSessionLock({
         stateDir,
-        parentPid: sessionInfo.parentPid,
-        parentStartToken: sessionInfo.parentStartToken,
-        watcherPid: selfPid,
+        client: args.client,
+        sessionKey: sessionInfo.key,
+        pid: selfPid,
+        isPidAlive,
       });
+      if (!sessionLock.acquired) {
+        if (args.client === "kimi" && args.once) {
+          sink.write(`${KIMI_OUTCOME_LINES[KIMI_EXIT_DUPLICATE]}\n`);
+        }
+        process.exit(KIMI_EXIT_DUPLICATE);
+        return;
+      }
+
+      if (args.client === "kimi" && args.once) {
+        kimiParentInfo = {
+          parentPid: sessionInfo.parentPid,
+          parentStartToken: sessionInfo.parentStartToken,
+        };
+        await claimKimiWatcherStart({
+          stateDir,
+          parentPid: sessionInfo.parentPid,
+          parentStartToken: sessionInfo.parentStartToken,
+          watcherPid: selfPid,
+        });
+      }
     }
+  } catch (err) {
+    if (!(err instanceof StateLockRecoveryRequiredError)) throw err;
+    logger.error(err.message);
+    if (sessionLock !== null) {
+      await sessionLock.release();
+    }
+    if (args.client === "kimi" && args.once) {
+      sink.write(`${KIMI_OUTCOME_LINES[KIMI_EXIT_FAILED]}\n`);
+    }
+    process.exit(KIMI_EXIT_FAILED);
+    return;
   }
 
   let activeClient: WsClient | null = null;
@@ -711,7 +725,11 @@ export async function watchMain(options: WatchOptions = {}): Promise<void> {
         parentStartToken: kimiParentInfo.parentStartToken,
         watcherPid: selfPid,
         latchReason,
-      }).catch(() => undefined);
+      }).catch((err: unknown) => {
+        if (err instanceof StateLockRecoveryRequiredError) {
+          logger.error(err.message);
+        }
+      });
     }
     if (sessionLock !== null) {
       await sessionLock.release();

@@ -6,9 +6,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   chmod,
+  link,
   lstat,
   mkdir,
-  open,
   readFile,
   rename,
   rmdir,
@@ -275,35 +275,100 @@ interface LockFilePayload {
   readonly createdAtMs: number;
 }
 
+type LockFileInspection =
+  | { readonly kind: "missing" }
+  | { readonly kind: "invalid" }
+  | { readonly kind: "valid"; readonly payload: LockFilePayload };
+
+export class StateLockRecoveryRequiredError extends Error {
+  readonly lockPath: string;
+
+  constructor(lockPath: string, reason: string) {
+    super(
+      `state lock at ${lockPath} requires QUIESCENT recovery (${reason}); ` +
+        "stop all snapper-mcp writers and hooks, verify that no writer is active, " +
+        "then move the lock file aside before retrying",
+    );
+    this.name = "StateLockRecoveryRequiredError";
+    this.lockPath = lockPath;
+  }
+}
+
+async function inspectLockFile(lockPath: string): Promise<LockFileInspection> {
+  const raw = await readTextIfPresent(lockPath);
+  if (raw === null) return { kind: "missing" };
+  try {
+    const parsed = JSON.parse(raw) as {
+      readonly pid?: unknown;
+      readonly token?: unknown;
+      readonly sessionKey?: unknown;
+      readonly createdAtMs?: unknown;
+    };
+    if (
+      typeof parsed.pid !== "number" ||
+      !Number.isInteger(parsed.pid) ||
+      parsed.pid <= 0 ||
+      typeof parsed.token !== "string" ||
+      parsed.token.length === 0 ||
+      typeof parsed.sessionKey !== "string" ||
+      typeof parsed.createdAtMs !== "number" ||
+      !Number.isFinite(parsed.createdAtMs)
+    ) {
+      return { kind: "invalid" };
+    }
+    return {
+      kind: "valid",
+      payload: {
+        pid: parsed.pid,
+        token: parsed.token,
+        sessionKey: parsed.sessionKey,
+        createdAtMs: parsed.createdAtMs,
+      },
+    };
+  } catch {
+    return { kind: "invalid" };
+  }
+}
+
 async function tryCreateExclusiveLock(
   lockPath: string,
   payload: LockFilePayload,
 ): Promise<boolean> {
+  const tmp = `${lockPath}.tmp.${process.pid}.${randomUUID()}`;
   try {
-    const handle = await open(lockPath, "wx", 0o600);
+    await writeFile(tmp, `${JSON.stringify(payload)}\n`, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    });
     try {
-      await handle.writeFile(`${JSON.stringify(payload)}\n`, "utf8");
-    } finally {
-      await handle.close();
+      await link(tmp, lockPath);
+    } catch (err) {
+      if (isExistsError(err)) return false;
+      throw err;
     }
     return true;
-  } catch (err) {
-    if (isExistsError(err)) return false;
-    throw err;
+  } finally {
+    await unlink(tmp).catch(() => undefined);
   }
 }
 
 async function releaseOwnedLock(lockPath: string, token: string): Promise<void> {
-  const raw = await readTextIfPresent(lockPath);
-  if (raw === null) return;
-  try {
-    const parsed = JSON.parse(raw) as { readonly token?: unknown };
-    if (parsed.token === token) {
-      await rm(lockPath, { force: true });
-    }
-  } catch {
-    // Do not unlink an unparseable file we cannot prove ownership of.
+  const inspected = await inspectLockFile(lockPath);
+  if (inspected.kind === "valid" && inspected.payload.token === token) {
+    await rm(lockPath, { force: true });
   }
+}
+
+function ownedSessionLockHandle(lockPath: string, token: string): SessionLockHandle {
+  let releasePromise: Promise<void> | null = null;
+  return {
+    acquired: true,
+    release: () => {
+      releasePromise ??= releaseOwnedLock(lockPath, token);
+      return releasePromise;
+    },
+  };
 }
 
 export async function acquireSessionLock(params: {
@@ -333,28 +398,19 @@ export async function acquireSessionLock(params: {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const created = await tryCreateExclusiveLock(lockPath, payload);
     if (created) {
-      return {
-        acquired: true,
-        release: () => releaseOwnedLock(lockPath, token),
-      };
+      return ownedSessionLockHandle(lockPath, token);
     }
-    const existingRaw = await readTextIfPresent(lockPath);
-    if (existingRaw === null) {
+    const inspected = await inspectLockFile(lockPath);
+    if (inspected.kind === "missing") {
       continue;
     }
-    let holderAlive = false;
-    try {
-      const existing = JSON.parse(existingRaw) as { readonly pid?: unknown };
-      if (typeof existing.pid === "number" && isPidAlive(existing.pid)) {
-        holderAlive = true;
-      }
-    } catch {
-      holderAlive = false;
+    if (inspected.kind === "invalid") {
+      throw new StateLockRecoveryRequiredError(lockPath, "malformed or incomplete payload");
     }
-    if (holderAlive) {
+    if (isPidAlive(inspected.payload.pid)) {
       return { acquired: false, release: () => Promise.resolve() };
     }
-    await rm(lockPath, { force: true });
+    throw new StateLockRecoveryRequiredError(lockPath, "recorded holder is not alive");
   }
   return { acquired: false, release: () => Promise.resolve() };
 }
@@ -366,9 +422,13 @@ export async function mutateLockedJsonFile<T, R>(params: {
   readonly mutate: (current: T) => { readonly next: T; readonly result: R };
   readonly isPidAlive?: (pid: number) => boolean;
   readonly platform?: NodeJS.Platform;
+  readonly nowMs?: () => number;
+  readonly sleepMs?: (ms: number) => Promise<void>;
 }): Promise<R> {
   const platform = params.platform ?? process.platform;
   const isPidAlive = params.isPidAlive ?? defaultIsPidAlive;
+  const nowMs = params.nowMs ?? Date.now;
+  const sleepMs = params.sleepMs ?? sleep;
   const runtimeDir = path.join(params.stateDir, "runtime");
   await ensurePrivateDir(runtimeDir, platform);
   const lockPath = path.join(runtimeDir, `${params.name}.mutex`);
@@ -381,36 +441,26 @@ export async function mutateLockedJsonFile<T, R>(params: {
     createdAtMs: Date.now(),
   };
 
-  const deadline = Date.now() + 1_500;
+  const deadline = nowMs() + 1_500;
   let acquired = false;
-  while (Date.now() < deadline) {
+  while (nowMs() < deadline) {
     acquired = await tryCreateExclusiveLock(lockPath, payload);
     if (acquired) break;
-    const raw = await readTextIfPresent(lockPath);
-    if (raw !== null) {
-      try {
-        const parsed = JSON.parse(raw) as {
-          readonly pid?: unknown;
-          readonly createdAtMs?: unknown;
-        };
-        const stalePid =
-          typeof parsed.pid !== "number" || !isPidAlive(parsed.pid);
-        const expired =
-          typeof parsed.createdAtMs === "number" &&
-          Date.now() - parsed.createdAtMs > 5_000;
-        if (stalePid || expired) {
-          await rm(lockPath, { force: true });
-          continue;
-        }
-      } catch {
-        await rm(lockPath, { force: true });
-        continue;
-      }
+    const inspected = await inspectLockFile(lockPath);
+    if (inspected.kind === "invalid") {
+      throw new StateLockRecoveryRequiredError(lockPath, "malformed or incomplete payload");
     }
-    await sleep(15);
+    if (inspected.kind === "valid" && !isPidAlive(inspected.payload.pid)) {
+      throw new StateLockRecoveryRequiredError(lockPath, "recorded holder is not alive");
+    }
+    await sleepMs(15);
   }
   if (!acquired) {
-    throw new Error(`timed out acquiring state lock for ${params.name}`);
+    throw new Error(
+      `timed out acquiring state lock for ${params.name} at ${lockPath}; ` +
+        "if no writer is active, QUIESCENT recovery is required: stop all " +
+        "snapper-mcp writers and hooks, verify quiescence, then move the lock file aside",
+    );
   }
 
   try {

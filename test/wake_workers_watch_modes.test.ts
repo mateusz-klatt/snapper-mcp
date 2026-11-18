@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
 import { tmpdir } from "node:os";
@@ -23,7 +23,12 @@ import type { BridgeEnv } from "../src/env.js";
 import type { ParentProcessSnapshot } from "../src/interactive.js";
 import { createLogger, setStderrWriterForTests } from "../src/logger.js";
 import { extractProxyWakeArgs } from "../src/main.js";
-import { acquireSessionLock, defaultIsPidAlive, writeWakePreference } from "../src/state_dir.js";
+import {
+  acquireSessionLock,
+  defaultIsPidAlive,
+  sha256Hex,
+  writeWakePreference,
+} from "../src/state_dir.js";
 import type { AiReviewDecisionAckFrame, AiReviewRequestFrame, ServerFrame } from "../src/types.js";
 import {
   consumeCursorFollowup,
@@ -238,6 +243,89 @@ describe("Cursor and Codex wake workers", () => {
     }
     expect(consumed).toBe(true);
     await worker.close();
+  });
+
+  it("reports Codex lock recovery without writing state or stdout", async () => {
+    const runtimeDir = path.join(stateDir, "runtime");
+    const mutexPath = path.join(runtimeDir, "codex-wake.mutex");
+    const dataPath = path.join(runtimeDir, "codex-wake.json");
+    await mkdir(runtimeDir, { recursive: true });
+    await writeFile(mutexPath, "codex-lock-secret", "utf8");
+    await writeFile(dataPath, "codex-state-secret", "utf8");
+    const diagnostics: string[] = [];
+    setStderrWriterForTests((line) => diagnostics.push(line));
+    const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation((() => true) as never);
+    const { factory, emit, isReady } = createFakeWsFactory();
+    const logger = createLogger("test-codex-lock", { SNAPPER_MCP_LOG_LEVEL: "debug" });
+    const worker = await startCodexWakeWorker({
+      env: bridgeEnv,
+      stateDir,
+      logger,
+      wsClientFactory: factory,
+    });
+
+    try {
+      expect(isReady()).toBe(true);
+      emit(makeReviewRequest());
+      const observed = await waitFor(() => diagnostics.join("").includes("QUIESCENT"), {
+        message: "Codex lock recovery diagnostic",
+      }).then(
+        () => true,
+        () => false,
+      );
+      if (!observed) {
+        throw new Error(`missing Codex diagnostic; captured=${diagnostics.join("")}`);
+      }
+    } finally {
+      await worker.close();
+    }
+
+    expect(diagnostics.join("")).toContain("codex wake state update failed");
+    expect(diagnostics.join("")).toContain(mutexPath);
+    expect(diagnostics.join("")).not.toContain("codex-lock-secret");
+    expect(diagnostics.join("")).not.toContain("codex-state-secret");
+    await expect(readFile(dataPath, "utf8")).resolves.toBe("codex-state-secret");
+    expect(stdoutSpy).not.toHaveBeenCalled();
+  });
+
+  it("reports Antigravity latch lock recovery without writing state or stdout", async () => {
+    const conversationId = "55555555-5555-4555-8555-555555555555";
+    await writeWakePreference(stateDir, "antigravity", "off", "linux");
+    const runtimeDir = path.join(stateDir, "runtime");
+    const mutexPath = path.join(runtimeDir, "antigravity-wake.mutex");
+    const dataPath = path.join(runtimeDir, "antigravity-wake.json");
+    await mkdir(runtimeDir, { recursive: true });
+    await writeFile(mutexPath, "agy-lock-secret", "utf8");
+    await writeFile(dataPath, "agy-state-secret", "utf8");
+    const diagnostics: string[] = [];
+    setStderrWriterForTests((line) => diagnostics.push(line));
+    const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation((() => true) as never);
+    const logger = createLogger("test-agy-lock", { SNAPPER_MCP_LOG_LEVEL: "debug" });
+
+    const code = await runAntigravityWakeCommand({
+      configPath: path.join(stateDir, "config.json"),
+      stateDir,
+      source: { ANTIGRAVITY_CONVERSATION_ID: conversationId },
+      logger,
+      inspector: () =>
+        Promise.resolve({
+          pid: 6100,
+          ppid: 1,
+          startToken: "start-6100",
+          executableName: "agy",
+          argv: ["agy"],
+          readsTerminal: true,
+        }),
+    });
+
+    expect(code).toBe(1);
+    expect(diagnostics.join("")).toContain("antigravity failure latch failed");
+    expect(diagnostics.join("")).toContain(mutexPath);
+    expect(diagnostics.join("")).toContain("QUIESCENT");
+    expect(diagnostics.join("")).not.toContain("agy-lock-secret");
+    expect(diagnostics.join("")).not.toContain("agy-state-secret");
+    await expect(readFile(dataPath, "utf8")).resolves.toBe("agy-state-secret");
+    expect(stdoutSpy).not.toHaveBeenCalled();
   });
 
   it("probes Codex idle state, retries when busy, and queues wake prompt when idle", async () => {
@@ -1011,6 +1099,37 @@ describe("watchMain & extractProxyWakeArgs multi-client modes", () => {
     expect(disabledLines).toEqual([`${KIMI_OUTCOME_LINES[KIMI_EXIT_DISABLED]}\n`]);
 
     await writeWakePreference(stateDir, "kimi", "on", "linux");
+    const recoveryKey = "sess-recovery";
+    const recoveryPath = path.join(
+      stateDir,
+      "locks",
+      `kimi-${sha256Hex(recoveryKey).slice(0, 24)}.lock`,
+    );
+    await mkdir(path.dirname(recoveryPath), { recursive: true });
+    await writeFile(recoveryPath, "malformed-watch-secret", "utf8");
+    const recoveryLines: string[] = [];
+    const recoveryDiagnostics: string[] = [];
+    setStderrWriterForTests((line) => recoveryDiagnostics.push(line));
+    expect(
+      await runExpectingExit(() =>
+        watchMain({
+          argv: ["--client", "kimi", "--once"],
+          source: baseSource,
+          sessionKey: recoveryKey,
+          pid: 4001,
+          isPidAlive: () => true,
+          stdout: { write: (s: string) => recoveryLines.push(s) },
+          install: false,
+        }),
+      ),
+    ).toBe(KIMI_EXIT_FAILED);
+    expect(recoveryLines).toEqual([`${KIMI_OUTCOME_LINES[KIMI_EXIT_FAILED]}\n`]);
+    expect(recoveryDiagnostics.join("")).toContain(recoveryPath);
+    expect(recoveryDiagnostics.join("")).toContain("QUIESCENT");
+    expect(recoveryDiagnostics.join("")).not.toContain("malformed-watch-secret");
+    await expect(readFile(recoveryPath, "utf8")).resolves.toBe("malformed-watch-secret");
+    setStderrWriterForTests(() => undefined);
+
     const heldLock = await acquireSessionLock({
       stateDir,
       client: "kimi",
