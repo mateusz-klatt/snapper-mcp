@@ -8,6 +8,8 @@ import {
   acquireSessionLock,
   mutateLockedJsonFile,
   sha256Hex,
+  StateLockContentionError,
+  StateRecoveryRequiredError,
 } from "../src/state_dir.js";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -168,7 +170,12 @@ describe("state_dir lock race regressions", () => {
         return Promise.resolve();
       },
     });
-    await expect(operation).rejects.toThrow("QUIESCENT");
+    const error = await operation.catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(StateLockContentionError);
+    expect(error).not.toBeInstanceOf(StateRecoveryRequiredError);
+    expect((error as Error).message).toContain("live state lock");
+    expect((error as Error).message).not.toContain("QUIESCENT");
+    expect((error as Error).message).not.toContain("move the lock file aside");
 
     expect(await actualFs.readFile(lockPath, "utf8")).toBe(original);
   });

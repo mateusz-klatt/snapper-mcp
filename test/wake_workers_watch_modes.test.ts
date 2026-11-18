@@ -27,6 +27,8 @@ import {
   acquireSessionLock,
   defaultIsPidAlive,
   sha256Hex,
+  StateLockContentionError,
+  StateRecoveryRequiredError,
   writeWakePreference,
 } from "../src/state_dir.js";
 import type { AiReviewDecisionAckFrame, AiReviewRequestFrame, ServerFrame } from "../src/types.js";
@@ -1129,6 +1131,35 @@ describe("watchMain & extractProxyWakeArgs multi-client modes", () => {
     expect(recoveryDiagnostics.join("")).not.toContain("malformed-watch-secret");
     await expect(readFile(recoveryPath, "utf8")).resolves.toBe("malformed-watch-secret");
     setStderrWriterForTests(() => undefined);
+
+    const contentionPath = path.join(stateDir, "runtime", "kimi-wake.mutex");
+    await mkdir(path.dirname(contentionPath), { recursive: true });
+    await writeFile(
+      contentionPath,
+      JSON.stringify({
+        pid: process.pid,
+        token: "live-runtime-holder",
+        sessionKey: "kimi-wake",
+        createdAtMs: Date.now(),
+      }),
+      "utf8",
+    );
+    const contentionLines: string[] = [];
+    const contentionError = await watchMain({
+      argv: ["--client", "kimi", "--once"],
+      source: baseSource,
+      sessionKey: "sess-contention",
+      pid: 4001,
+      isPidAlive: () => true,
+      stdout: { write: (s: string) => contentionLines.push(s) },
+      install: false,
+    }).catch((err: unknown) => err);
+    expect(contentionError).toBeInstanceOf(StateLockContentionError);
+    expect(contentionError).not.toBeInstanceOf(StateRecoveryRequiredError);
+    expect((contentionError as Error).message).not.toContain("move the lock file aside");
+    expect((contentionError as Error).message).not.toContain("QUIESCENT");
+    expect(contentionLines).toEqual([]);
+    await rm(contentionPath, { force: true });
 
     const heldLock = await acquireSessionLock({
       stateDir,

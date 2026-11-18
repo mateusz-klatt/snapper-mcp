@@ -283,7 +283,9 @@ describe("state_dir & toml_edit edge cases", () => {
           return Promise.resolve();
         },
       });
-    await expect(mutateExpired()).rejects.toThrow("QUIESCENT");
+    await expect(mutateExpired()).rejects.toMatchObject({
+      name: "StateLockContentionError",
+    });
     await unlink(path.join(runtimeDir, "expired.mutex"));
     await expect(mutateExpired()).resolves.toBe(15);
 

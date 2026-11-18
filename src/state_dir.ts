@@ -305,10 +305,16 @@ export class StateLockRecoveryRequiredError extends StateRecoveryRequiredError {
   }
 }
 
-export class StateLockContentionError extends StateLockRecoveryRequiredError {
+export class StateLockContentionError extends Error {
+  readonly lockPath: string;
+
   constructor(lockPath: string, name: string) {
-    super(lockPath, `timed out acquiring state lock for ${name}`);
+    super(
+      `timed out after 1.5 s waiting for live state lock ${name} at ${lockPath}; ` +
+        "another snapper-mcp process holds it",
+    );
     this.name = "StateLockContentionError";
+    this.lockPath = lockPath;
   }
 }
 

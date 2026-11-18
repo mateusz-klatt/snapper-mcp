@@ -26,6 +26,7 @@ import {
   isWakeEnabled,
   readWakePreference,
   resolveStateDir,
+  StateLockContentionError,
   StateRecoveryRequiredError,
 } from "./state_dir.js";
 import {
@@ -626,7 +627,7 @@ export async function hookMain(options: HookOptions = {}): Promise<void> {
       options.stdout.write(output);
     }
   } catch (err) {
-    if (err instanceof StateRecoveryRequiredError) {
+    if (err instanceof StateRecoveryRequiredError || err instanceof StateLockContentionError) {
       const diagnostic = `[snapper-mcp hook] ${err.message}\n`;
       if (options.stderr !== undefined) {
         options.stderr.write(diagnostic);
