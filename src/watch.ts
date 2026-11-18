@@ -46,7 +46,7 @@ import {
   defaultIsPidAlive,
   readWakePreference,
   resolveStateDir,
-  StateLockRecoveryRequiredError,
+  StateRecoveryRequiredError,
   type SessionLockHandle,
 } from "./state_dir.js";
 import { TokenStore } from "./token_store.js";
@@ -655,7 +655,7 @@ export async function watchMain(options: WatchOptions = {}): Promise<void> {
       }
     }
   } catch (err) {
-    if (!(err instanceof StateLockRecoveryRequiredError)) throw err;
+    if (!(err instanceof StateRecoveryRequiredError)) throw err;
     logger.error(err.message);
     if (sessionLock !== null) {
       await sessionLock.release();
@@ -726,7 +726,7 @@ export async function watchMain(options: WatchOptions = {}): Promise<void> {
         watcherPid: selfPid,
         latchReason,
       }).catch((err: unknown) => {
-        if (err instanceof StateLockRecoveryRequiredError) {
+        if (err instanceof StateRecoveryRequiredError) {
           logger.error(err.message);
         }
       });

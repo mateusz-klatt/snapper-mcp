@@ -253,6 +253,10 @@ describe("state_dir & toml_edit edge cases", () => {
       });
     await expect(mutateSample()).rejects.toThrow("QUIESCENT");
     await unlink(path.join(runtimeDir, "sample.mutex"));
+    await expect(mutateSample()).rejects.toMatchObject({
+      name: "StateDataRecoveryRequiredError",
+    });
+    await unlink(path.join(runtimeDir, "sample.json"));
     await expect(mutateSample()).resolves.toBe(2);
 
     await writeFile(

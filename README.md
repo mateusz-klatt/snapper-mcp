@@ -143,10 +143,22 @@ the protected mutation does not run, and a diagnostic containing the exact lock
 path and recovery instruction is written to stderr. Hook exit behavior and
 stdout protocols remain unchanged.
 
+Runtime data is initialized only when its file is absent. Existing empty or
+unparseable data raises a distinct recovery error and is never replaced with
+default state; read and permission errors propagate. Recovery diagnostics never
+include the lock or data payload.
+
 Recovery requires a quiescent state. Stop every `snapper-mcp` watcher, MCP
 server, wake worker, and CLI hook, verify that no writer is still active, then
-move the reported lock file aside for diagnosis before restarting. Never remove
-a lock file while any writer is active.
+move the reported lock or data file aside for diagnosis before restarting. Never remove
+a lock file while any writer is active. Orphaned `*.tmp.*` publication files are
+also safe to remove only while quiescent. Hard-link creation requires filesystem
+support; unsupported filesystems fail closed instead of selecting an unsafe
+fallback.
+
+A failed wake-state update is logged and dropped rather than retried. This is an
+availability limitation that requires operator attention, not a successful
+update or a safe automatic recovery.
 
 A rolling upgrade with mixed versions is not supported. Older writers can still
 reclaim malformed or aged locks. Quiesce all old writers and hooks before

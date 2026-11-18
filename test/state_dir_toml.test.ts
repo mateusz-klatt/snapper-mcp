@@ -171,13 +171,14 @@ describe("state_dir", () => {
     await recovered.release();
   });
 
-  it("requires quiescent mutex recovery before mutating corrupted runtime JSON", async () => {
+  it("requires quiescent mutex and data recovery before mutating runtime JSON", async () => {
     const stateDir = await makeTemp();
     const runtimeDir = path.join(stateDir, "runtime");
     await ensurePrivateDir(runtimeDir);
     const mutexPath = path.join(runtimeDir, "sample.mutex");
+    const dataPath = path.join(runtimeDir, "sample.json");
     await writeFile(mutexPath, "{not-json", "utf8");
-    await writeFile(path.join(runtimeDir, "sample.json"), "{corrupt", "utf8");
+    await writeFile(dataPath, "{corrupt", "utf8");
 
     const mutate = (): Promise<number> =>
       mutateLockedJsonFile({
@@ -190,6 +191,11 @@ describe("state_dir", () => {
     expect(await readTextIfPresent(mutexPath)).toBe("{not-json");
 
     await rm(mutexPath, { force: true });
+    await expect(mutate()).rejects.toMatchObject({
+      name: "StateDataRecoveryRequiredError",
+      dataPath,
+    });
+    await rm(dataPath, { force: true });
     await expect(mutate()).resolves.toBe(5);
     expect(await readRuntimeJsonFile(stateDir, "sample", () => ({ count: 0 }))).toEqual({
       count: 5,

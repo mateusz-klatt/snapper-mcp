@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Prevent concurrent lock ownership during payload publication, live-holder aging, stale-lock cleanup, and repeated owner release. Locks now use complete-payload exclusive hard-link publication, online third-party reclaim is disabled, and owner release is single-flight.
-- Surface required quiescent lock recovery through watch, hook, and wake-worker diagnostics without corrupting stdout protocols or mutating protected state. Document the requirement to quiesce all older writers and hooks before running the patched version.
+- Surface required quiescent lock and runtime-data recovery through watch, hook, and wake-worker diagnostics without corrupting stdout protocols or mutating protected state. Existing empty or unparseable runtime data is preserved instead of being replaced with default state. Document orphan temporary-file cleanup, dropped-event availability, platform limits, and the requirement to quiesce all older writers and hooks before running the patched version.
 
 ## [0.16.0] — 2026-11-15
 

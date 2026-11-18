@@ -280,7 +280,17 @@ type LockFileInspection =
   | { readonly kind: "invalid" }
   | { readonly kind: "valid"; readonly payload: LockFilePayload };
 
-export class StateLockRecoveryRequiredError extends Error {
+export class StateRecoveryRequiredError extends Error {
+  readonly recoveryPath: string;
+
+  constructor(message: string, recoveryPath: string) {
+    super(message);
+    this.name = "StateRecoveryRequiredError";
+    this.recoveryPath = recoveryPath;
+  }
+}
+
+export class StateLockRecoveryRequiredError extends StateRecoveryRequiredError {
   readonly lockPath: string;
 
   constructor(lockPath: string, reason: string) {
@@ -288,9 +298,32 @@ export class StateLockRecoveryRequiredError extends Error {
       `state lock at ${lockPath} requires QUIESCENT recovery (${reason}); ` +
         "stop all snapper-mcp writers and hooks, verify that no writer is active, " +
         "then move the lock file aside before retrying",
+      lockPath,
     );
     this.name = "StateLockRecoveryRequiredError";
     this.lockPath = lockPath;
+  }
+}
+
+export class StateLockContentionError extends StateLockRecoveryRequiredError {
+  constructor(lockPath: string, name: string) {
+    super(lockPath, `timed out acquiring state lock for ${name}`);
+    this.name = "StateLockContentionError";
+  }
+}
+
+export class StateDataRecoveryRequiredError extends StateRecoveryRequiredError {
+  readonly dataPath: string;
+
+  constructor(dataPath: string, reason: string) {
+    super(
+      `runtime state data at ${dataPath} requires QUIESCENT recovery (${reason}); ` +
+        "stop all snapper-mcp writers and hooks, verify that no writer is active, " +
+        "then move the data file aside before retrying",
+      dataPath,
+    );
+    this.name = "StateDataRecoveryRequiredError";
+    this.dataPath = dataPath;
   }
 }
 
@@ -456,23 +489,22 @@ export async function mutateLockedJsonFile<T, R>(params: {
     await sleepMs(15);
   }
   if (!acquired) {
-    throw new Error(
-      `timed out acquiring state lock for ${params.name} at ${lockPath}; ` +
-        "if no writer is active, QUIESCENT recovery is required: stop all " +
-        "snapper-mcp writers and hooks, verify quiescence, then move the lock file aside",
-    );
+    throw new StateLockContentionError(lockPath, params.name);
   }
 
   try {
     const raw = await readTextIfPresent(dataPath);
     let current: T;
-    if (raw === null || raw.trim().length === 0) {
+    if (raw === null) {
       current = params.initial();
     } else {
+      if (raw.trim().length === 0) {
+        throw new StateDataRecoveryRequiredError(dataPath, "empty payload");
+      }
       try {
         current = JSON.parse(raw) as T;
       } catch {
-        current = params.initial();
+        throw new StateDataRecoveryRequiredError(dataPath, "malformed payload");
       }
     }
     const { next, result } = params.mutate(current);

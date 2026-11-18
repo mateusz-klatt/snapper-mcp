@@ -26,7 +26,7 @@ import {
   isWakeEnabled,
   readWakePreference,
   resolveStateDir,
-  StateLockRecoveryRequiredError,
+  StateRecoveryRequiredError,
 } from "./state_dir.js";
 import {
   clearKimiSession,
@@ -626,7 +626,7 @@ export async function hookMain(options: HookOptions = {}): Promise<void> {
       options.stdout.write(output);
     }
   } catch (err) {
-    if (err instanceof StateLockRecoveryRequiredError) {
+    if (err instanceof StateRecoveryRequiredError) {
       const diagnostic = `[snapper-mcp hook] ${err.message}\n`;
       if (options.stderr !== undefined) {
         options.stderr.write(diagnostic);

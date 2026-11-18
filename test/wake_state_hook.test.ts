@@ -684,6 +684,27 @@ describe("hookMain client handlers", () => {
     expect(stderr.text()).not.toContain("sentinel-state-secret");
     await expect(readFile(mutexPath, "utf8")).resolves.toBe("malformed-lock-secret");
     await expect(readFile(dataPath, "utf8")).resolves.toBe("sentinel-state-secret");
+
+    await rm(mutexPath, { force: true });
+    const dataStdout = new OutputBuffer();
+    const dataStderr = new OutputBuffer();
+    await hookMain({
+      argv: ["--client", "kimi", "--event", "SessionStart"],
+      source: env,
+      platform: "linux",
+      stdin: JSON.stringify({ session_id: "kimi-data-recovery" }),
+      stdout: dataStdout,
+      stderr: dataStderr,
+      inspector: () => Promise.resolve(makeParent("kimi", ["kimi"])),
+    });
+
+    expect(dataStdout.text()).toBe("");
+    expect(dataStderr.text()).toContain("runtime state data");
+    expect(dataStderr.text()).toContain(dataPath);
+    expect(dataStderr.text()).toContain("QUIESCENT");
+    expect(dataStderr.text()).not.toContain("sentinel-state-secret");
+    await expect(readFile(dataPath, "utf8")).resolves.toBe("sentinel-state-secret");
+    await expect(readFile(mutexPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("handles Cursor stop hook follow-up consumption and loop_count guard", async () => {

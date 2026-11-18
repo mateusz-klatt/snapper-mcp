@@ -16,6 +16,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     ...actual,
     link: vi.fn(actual.link),
     open: vi.fn(actual.open),
+    readFile: vi.fn(actual.readFile),
     rm: vi.fn(actual.rm),
   };
 });
@@ -69,6 +70,7 @@ describe("state_dir lock race regressions", () => {
   beforeEach(() => {
     vi.mocked(fs.link).mockImplementation(actualFs.link);
     vi.mocked(fs.open).mockImplementation(actualFs.open);
+    vi.mocked(fs.readFile).mockImplementation(actualFs.readFile);
     vi.mocked(fs.rm).mockImplementation(actualFs.rm);
   });
 
@@ -322,6 +324,92 @@ describe("state_dir lock race regressions", () => {
         await replacement.release();
       }
     }
+  });
+
+  it.each([
+    { label: "corrupt", contents: "{corrupt-data-secret" },
+    { label: "empty", contents: "" },
+  ])("preserves $label runtime data and releases the mutex", async ({ contents }) => {
+    const stateDir = await makeTemp();
+    const runtimeDir = path.join(stateDir, "runtime");
+    const dataPath = path.join(runtimeDir, "sample.json");
+    const mutexPath = path.join(runtimeDir, "sample.mutex");
+    await actualFs.mkdir(runtimeDir, { recursive: true });
+    await actualFs.writeFile(dataPath, contents, "utf8");
+    let mutationCalls = 0;
+
+    const operation = mutateLockedJsonFile({
+      stateDir,
+      name: "sample",
+      initial: () => ({ count: 0 }),
+      mutate: (current) => {
+        mutationCalls += 1;
+        return { next: { count: current.count + 1 }, result: current.count + 1 };
+      },
+    });
+
+    await expect(operation).rejects.toMatchObject({
+      name: "StateDataRecoveryRequiredError",
+      dataPath,
+      message: expect.stringContaining("QUIESCENT"),
+    });
+    expect(mutationCalls).toBe(0);
+    expect(await actualFs.readFile(dataPath, "utf8")).toBe(contents);
+    await expect(actualFs.lstat(mutexPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("initializes runtime data only when the file is absent", async () => {
+    const stateDir = await makeTemp();
+    const dataPath = path.join(stateDir, "runtime", "sample.json");
+    const mutexPath = path.join(stateDir, "runtime", "sample.mutex");
+
+    await expect(
+      mutateLockedJsonFile({
+        stateDir,
+        name: "sample",
+        initial: () => ({ count: 0 }),
+        mutate: (current) => ({
+          next: { count: current.count + 1 },
+          result: current.count + 1,
+        }),
+      }),
+    ).resolves.toBe(1);
+
+    expect(JSON.parse(await actualFs.readFile(dataPath, "utf8"))).toEqual({ count: 1 });
+    await expect(actualFs.lstat(mutexPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("propagates runtime data read errors without mutation or lock retention", async () => {
+    const stateDir = await makeTemp();
+    const runtimeDir = path.join(stateDir, "runtime");
+    const dataPath = path.join(runtimeDir, "sample.json");
+    const mutexPath = path.join(runtimeDir, "sample.mutex");
+    await actualFs.mkdir(runtimeDir, { recursive: true });
+    await actualFs.writeFile(dataPath, "preserve-read-error", "utf8");
+    let mutationCalls = 0;
+    vi.mocked(fs.readFile).mockImplementation(async (target, options) => {
+      if (target === dataPath) {
+        const error = new Error("injected data read failure") as NodeJS.ErrnoException;
+        error.code = "EACCES";
+        throw error;
+      }
+      return actualFs.readFile(target, options);
+    });
+
+    const operation = mutateLockedJsonFile({
+      stateDir,
+      name: "sample",
+      initial: () => ({ count: 0 }),
+      mutate: (current) => {
+        mutationCalls += 1;
+        return { next: { count: current.count + 1 }, result: current.count + 1 };
+      },
+    });
+
+    await expect(operation).rejects.toThrow("injected data read failure");
+    expect(mutationCalls).toBe(0);
+    expect(await actualFs.readFile(dataPath, "utf8")).toBe("preserve-read-error");
+    await expect(actualFs.lstat(mutexPath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("cleans temporary payloads when exclusive link publication fails", async () => {
