@@ -164,6 +164,13 @@ A failed wake-state update is logged and dropped rather than retried. This is an
 availability limitation that requires operator attention, not a successful
 update or a safe automatic recovery.
 
+If finish persistence or lock release fails after otherwise normal completion,
+`watch` exits nonzero with `watch cleanup failed` instead of implying clean
+completion. The session outcome line describes the operation, while the cleanup
+diagnostic describes incomplete finalization. When an operational exception is
+already in flight, that original exception propagates and cleanup failures are
+logged separately.
+
 A rolling upgrade with mixed versions is not supported. Older writers can still
 reclaim malformed or aged locks. Quiesce all old writers and hooks before
 starting the patched version, and keep them stopped while the new version is

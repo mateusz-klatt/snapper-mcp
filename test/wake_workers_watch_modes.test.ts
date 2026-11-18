@@ -1,3 +1,4 @@
+import { writeFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
@@ -1225,6 +1226,45 @@ describe("watchMain & extractProxyWakeArgs multi-client modes", () => {
     expect(setupRetryLock.acquired).toBe(true);
     await setupRetryLock.release();
 
+    const precedenceMutex = path.join(stateDir, "runtime", "kimi-wake.mutex");
+    const precedenceDiagnostics: string[] = [];
+    setStderrWriterForTests((line) => precedenceDiagnostics.push(line));
+    const precedenceError = await watchMain({
+      argv: ["--client", "kimi", "--once"],
+      source: baseSource,
+      sessionKey: "sess-precedence",
+      pid: 4001,
+      isPidAlive: () => true,
+      wsClientFactory: () => {
+        writeFileSync(
+          precedenceMutex,
+          JSON.stringify({
+            pid: process.pid,
+            token: "finish-contention",
+            sessionKey: "kimi-wake",
+            createdAtMs: Date.now(),
+          }),
+          "utf8",
+        );
+        throw new Error("injected precedence failure");
+      },
+      stdout: { write: () => undefined },
+      install: false,
+    }).catch((err: unknown) => err);
+    expect((precedenceError as Error).message).toBe("injected precedence failure");
+    expect(precedenceDiagnostics.join("")).toContain("Kimi watcher finish update failed");
+    expect(precedenceDiagnostics.join("")).toContain("live state lock");
+    const precedenceSessionPath = path.join(
+      stateDir,
+      "locks",
+      `kimi-${sha256Hex("sess-precedence").slice(0, 24)}.lock`,
+    );
+    await expect(readFile(precedenceSessionPath, "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await rm(precedenceMutex, { force: true });
+    setStderrWriterForTests(() => undefined);
+
     const heldLock = await acquireSessionLock({
       stateDir,
       client: "kimi",
@@ -1283,6 +1323,43 @@ describe("watchMain & extractProxyWakeArgs multi-client modes", () => {
     okWs.emit(makeReviewRequest());
     expect(await okRun).toBe(KIMI_EXIT_ATTENTION);
     expect(okLines).toEqual([`${SNAPPER_KIMI_ATTENTION_LINE}\n`]);
+
+    const cleanupWs = createFakeWsFactory();
+    const cleanupLines: string[] = [];
+    const cleanupRun = watchMain({
+      argv: ["--client", "kimi", "--once"],
+      source: baseSource,
+      sessionKey: "sess-cleanup",
+      wsClientFactory: cleanupWs.factory,
+      stdout: { write: (s: string) => cleanupLines.push(s) },
+      install: false,
+    });
+    await waitFor(cleanupWs.isReady, { message: "Kimi cleanup ws ready" });
+    const cleanupMutex = path.join(stateDir, "runtime", "kimi-wake.mutex");
+    await writeFile(
+      cleanupMutex,
+      JSON.stringify({
+        pid: process.pid,
+        token: "normal-finish-contention",
+        sessionKey: "kimi-wake",
+        createdAtMs: Date.now(),
+      }),
+      "utf8",
+    );
+    cleanupWs.emit(makeReviewRequest());
+    const cleanupFailure = await cleanupRun.catch((err: unknown) => err);
+    expect((cleanupFailure as Error).message).toBe("watch cleanup failed");
+    expect((cleanupFailure as Error).cause).toBeInstanceOf(StateLockContentionError);
+    expect(cleanupLines).toEqual([`${SNAPPER_KIMI_ATTENTION_LINE}\n`]);
+    const cleanupSessionPath = path.join(
+      stateDir,
+      "locks",
+      `kimi-${sha256Hex("sess-cleanup").slice(0, 24)}.lock`,
+    );
+    await expect(readFile(cleanupSessionPath, "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await rm(cleanupMutex, { force: true });
 
     const copilotWs = createFakeWsFactory();
     const copilotLines: string[] = [];
