@@ -2064,6 +2064,7 @@ describe.skipIf(!CAN_LISTEN_ON_LOOPBACK)("main proxy wake workers & watch/worker
     });
     let agyBusyOpts: WsClientOptions | null = null;
     let parentAlive = true;
+    let busyAliveChecks = 0;
     const busyHelper = runAntigravityWakeCommand({
       env: bridgeEnv,
       configPath: "/c",
@@ -2081,9 +2082,12 @@ describe.skipIf(!CAN_LISTEN_ON_LOOPBACK)("main proxy wake workers & watch/worker
       },
       logger,
       dialTcp: () => Promise.resolve(true),
-      isPidAlive: () => parentAlive,
+      isPidAlive: () => {
+        busyAliveChecks += 1;
+        return parentAlive;
+      },
       settleMs: 5,
-      pollMs: 20,
+      pollMs: 30,
       wsClientFactory: (opts) => {
         agyBusyOpts = opts;
         let finish: (() => void) | null = null;
@@ -2101,7 +2105,7 @@ describe.skipIf(!CAN_LISTEN_ON_LOOPBACK)("main proxy wake workers & watch/worker
     });
     await waitFor(() => agyBusyOpts !== null, { message: "agy busy ws ready" });
     (agyBusyOpts as WsClientOptions | null)?.onFrame(makeReviewRequest());
-    await new Promise((r) => setTimeout(r, 15));
+    await waitFor(() => busyAliveChecks >= 2, { message: "agy busy retry checked" });
     parentAlive = false;
     expect(await busyHelper).toBe(0);
 

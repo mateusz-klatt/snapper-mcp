@@ -1012,6 +1012,11 @@ export interface AntigravityWakeOptions {
     readonly message: string;
     readonly env: NodeJS.ProcessEnv;
   }) => Promise<boolean>;
+  readonly setReservation?: (
+    stateDir: string,
+    conversationId: string,
+    reserved: boolean,
+  ) => Promise<boolean>;
   readonly wsClientFactory?: (opts: WsClientOptions) => WsClient;
   readonly settleMs?: number;
   readonly pollMs?: number;
@@ -1208,6 +1213,7 @@ async function runAntigravityChildHelper(
 ): Promise<number> {
   const isPidAlive = options.isPidAlive ?? defaultIsPidAlive;
   const sendMessage = options.sendMessage ?? sendAntigravityWakeMessage;
+  const setReservation = options.setReservation ?? setAntigravityReservation;
   const settleMs = options.settleMs ?? 1_000;
   const pollMs = options.pollMs ?? 5_000;
 
@@ -1233,9 +1239,11 @@ async function runAntigravityChildHelper(
   }
 
   let pendingWake = false;
+  let holdsReservation = false;
   let closed = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let resolveDone: (() => void) | null = null;
+  const inFlight = new Set<Promise<unknown>>();
   const donePromise = new Promise<void>((resolve) => {
     resolveDone = resolve;
   });
@@ -1254,7 +1262,18 @@ async function runAntigravityChildHelper(
     if (closed || timer !== null) return;
     timer = setTimeout(() => {
       timer = null;
-      void tryDeliver();
+      const deliverOp = tryDeliver()
+        .catch((err: unknown) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          options.logger.warn(`antigravity wake delivery failed: ${msg}`);
+          if (!closed) {
+            scheduleAttempt(pollMs);
+          }
+        })
+        .finally(() => {
+          inFlight.delete(deliverOp);
+        });
+      inFlight.add(deliverOp);
     }, delayMs);
   };
 
@@ -1265,30 +1284,50 @@ async function runAntigravityChildHelper(
       return;
     }
     const pref = await readWakePreference(options.stateDir, "antigravity");
+    if (closed) return;
     if (!isWakeEnabled(pref)) {
       stopHelper();
       return;
     }
-    const reserved = await setAntigravityReservation(options.stateDir, convId, true);
+    if (holdsReservation) {
+      await setReservation(options.stateDir, convId, false);
+      holdsReservation = false;
+      if (closed) return;
+    }
+    const reserved = await setReservation(options.stateDir, convId, true);
+    if (closed) return;
     if (!reserved) {
       scheduleAttempt(pollMs);
       return;
     }
-    const ok = await sendMessage({
-      agyExecutable: handshake.agyExe,
-      conversationId: convId,
-      message: SNAPPER_WAKE_PROMPT,
-      env: {
-        ...options.source,
-        ANTIGRAVITY_CONVERSATION_ID: convId,
-        ANTIGRAVITY_LS_ADDRESS: canonicalLs,
-        ANTIGRAVITY_CSRF_TOKEN: csrf,
-      },
-    });
+    holdsReservation = true;
+    let ok = false;
+    let sendErr: unknown = null;
+    let sendThrew = false;
+    try {
+      ok = await sendMessage({
+        agyExecutable: handshake.agyExe,
+        conversationId: convId,
+        message: SNAPPER_WAKE_PROMPT,
+        env: {
+          ...options.source,
+          ANTIGRAVITY_CONVERSATION_ID: convId,
+          ANTIGRAVITY_LS_ADDRESS: canonicalLs,
+          ANTIGRAVITY_CSRF_TOKEN: csrf,
+        },
+      });
+    } catch (err) {
+      sendThrew = true;
+      sendErr = err;
+    }
+    if (closed) return;
     if (ok) {
       pendingWake = false;
+      holdsReservation = false;
     } else {
-      await setAntigravityReservation(options.stateDir, convId, false);
+      await setReservation(options.stateDir, convId, false);
+      holdsReservation = false;
+      if (sendThrew) throw sendErr;
       scheduleAttempt(pollMs);
     }
   };
@@ -1314,6 +1353,9 @@ async function runAntigravityChildHelper(
     await donePromise;
   } finally {
     clearInterval(livenessInterval);
+    if (inFlight.size > 0) {
+      await Promise.allSettled([...inFlight]);
+    }
     await stream.close();
   }
   return 0;
