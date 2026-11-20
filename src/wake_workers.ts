@@ -1012,6 +1012,11 @@ export interface AntigravityWakeOptions {
     readonly message: string;
     readonly env: NodeJS.ProcessEnv;
   }) => Promise<boolean>;
+  readonly setReservation?: (
+    stateDir: string,
+    conversationId: string,
+    reserved: boolean,
+  ) => Promise<boolean>;
   readonly wsClientFactory?: (opts: WsClientOptions) => WsClient;
   readonly settleMs?: number;
   readonly pollMs?: number;
@@ -1208,6 +1213,7 @@ async function runAntigravityChildHelper(
 ): Promise<number> {
   const isPidAlive = options.isPidAlive ?? defaultIsPidAlive;
   const sendMessage = options.sendMessage ?? sendAntigravityWakeMessage;
+  const setReservation = options.setReservation ?? setAntigravityReservation;
   const settleMs = options.settleMs ?? 1_000;
   const pollMs = options.pollMs ?? 5_000;
 
@@ -1233,6 +1239,7 @@ async function runAntigravityChildHelper(
   }
 
   let pendingWake = false;
+  let holdsReservation = false;
   let closed = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let resolveDone: (() => void) | null = null;
@@ -1282,12 +1289,18 @@ async function runAntigravityChildHelper(
       stopHelper();
       return;
     }
-    const reserved = await setAntigravityReservation(options.stateDir, convId, true);
+    if (holdsReservation) {
+      await setReservation(options.stateDir, convId, false);
+      holdsReservation = false;
+      if (closed) return;
+    }
+    const reserved = await setReservation(options.stateDir, convId, true);
     if (closed) return;
     if (!reserved) {
       scheduleAttempt(pollMs);
       return;
     }
+    holdsReservation = true;
     let ok = false;
     let sendErr: unknown = null;
     let sendThrew = false;
@@ -1310,8 +1323,10 @@ async function runAntigravityChildHelper(
     if (closed) return;
     if (ok) {
       pendingWake = false;
+      holdsReservation = false;
     } else {
-      await setAntigravityReservation(options.stateDir, convId, false);
+      await setReservation(options.stateDir, convId, false);
+      holdsReservation = false;
       if (sendThrew) throw sendErr;
       scheduleAttempt(pollMs);
     }

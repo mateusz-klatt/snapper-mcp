@@ -41,6 +41,7 @@ import {
   recordAntigravityTurnEvent,
   recordCodexActionableEvent,
   recordCodexSession,
+  setAntigravityReservation,
 } from "../src/wake_state.js";
 import {
   AGY_HELPER_ENV,
@@ -976,6 +977,22 @@ describe("Antigravity loopback validation, sender, launcher, and helper", () => 
         logger,
       }),
     ).toBe(1);
+    expect(
+      await runAntigravityWakeCommand({
+        env: bridgeEnv,
+        configPath: path.join(stateDir, "config.json"),
+        stateDir,
+        source: {
+          [AGY_HELPER_ENV]: JSON.stringify({
+            agyPid: 6100,
+            agyStartToken: "st-6100",
+            attemptId: "att",
+            agyExe: "agy",
+          }),
+        },
+        logger,
+      }),
+    ).toBe(1);
   });
 
   it("logs and retries Antigravity reservation/send rejections after pollMs without unhandledRejection", async () => {
@@ -1034,6 +1051,9 @@ describe("Antigravity loopback validation, sender, launcher, and helper", () => 
           if (sendCalls === 1) {
             return Promise.reject(new Error("send boom"));
           }
+          if (sendCalls === 2) {
+            return Promise.reject("send string boom" as unknown as Error);
+          }
           delivered.push(message);
           parentAlive = false;
           return Promise.resolve(true);
@@ -1049,10 +1069,169 @@ describe("Antigravity loopback validation, sender, launcher, and helper", () => 
       await rm(mutexPath, { force: true });
 
       expect(await helperPromise).toBe(0);
-      expect(sendCalls).toBe(2);
+      expect(sendCalls).toBe(3);
       expect(delivered).toEqual([SNAPPER_WAKE_PROMPT]);
       expect(sendTimestamps[1]! - sendTimestamps[0]!).toBeGreaterThanOrEqual(20);
+      expect(sendTimestamps[2]! - sendTimestamps[1]!).toBeGreaterThanOrEqual(20);
       expect(diagnostics.join("")).toContain("antigravity wake delivery failed: send boom");
+      expect(diagnostics.join("")).toContain("antigravity wake delivery failed: send string boom");
+      expect(unhandledSpy).not.toHaveBeenCalled();
+    } finally {
+      process.off("unhandledRejection", unhandledSpy);
+    }
+  });
+
+  it("recovers and delivers when releasing a failed Antigravity reservation throws once", async () => {
+    const convId = "47474747-4747-4747-8747-474747474747";
+    await writeWakePreference(stateDir, "antigravity", "on", "linux");
+    await recordAntigravityTurnEvent({
+      stateDir,
+      agyPid: 6400,
+      agyStartToken: "st-6400",
+      conversationId: convId,
+      idle: true,
+      clearReservation: true,
+    });
+
+    const diagnostics: string[] = [];
+    setStderrWriterForTests((line) => diagnostics.push(line));
+    const logger = createLogger("test-agy-release-retry", { SNAPPER_MCP_LOG_LEVEL: "debug" });
+    const unhandledSpy = vi.fn();
+    process.on("unhandledRejection", unhandledSpy);
+
+    try {
+      let parentAlive = true;
+      let releaseCalls = 0;
+      let sendCalls = 0;
+      const delivered: string[] = [];
+      const { factory, isReady, emit } = createFakeWsFactory();
+      const helperPromise = runAntigravityWakeCommand({
+        env: bridgeEnv,
+        configPath: path.join(stateDir, "config.json"),
+        stateDir,
+        source: {
+          [AGY_HELPER_ENV]: JSON.stringify({
+            agyPid: 6400,
+            agyStartToken: "st-6400",
+            attemptId: "att-release-retry",
+            agyExe: "agy",
+          }),
+          ANTIGRAVITY_CONVERSATION_ID: convId,
+          ANTIGRAVITY_CSRF_TOKEN: "csrf-ok",
+          ANTIGRAVITY_LS_ADDRESS: "127.0.0.1:5000",
+        },
+        logger,
+        isPidAlive: () => parentAlive,
+        dialTcp: () => Promise.resolve(true),
+        wsClientFactory: factory,
+        settleMs: 5,
+        pollMs: 25,
+        setReservation: (sd, id, reserved) => {
+          if (!reserved) {
+            releaseCalls += 1;
+            if (releaseCalls === 1) {
+              return Promise.reject(new Error("release boom"));
+            }
+          }
+          return setAntigravityReservation(sd, id, reserved);
+        },
+        sendMessage: ({ message }) => {
+          sendCalls += 1;
+          if (sendCalls === 1) {
+            return Promise.resolve(false);
+          }
+          delivered.push(message);
+          parentAlive = false;
+          return Promise.resolve(true);
+        },
+      });
+
+      await waitFor(isReady, { message: "Antigravity release retry stream ready" });
+      emit(makeReviewRequest());
+      expect(await helperPromise).toBe(0);
+      expect(releaseCalls).toBe(2);
+      expect(sendCalls).toBe(2);
+      expect(delivered).toEqual([SNAPPER_WAKE_PROMPT]);
+      expect(diagnostics.join("")).toContain("antigravity wake delivery failed: release boom");
+      expect(unhandledSpy).not.toHaveBeenCalled();
+
+      // Also verify stop during retry-release when holdsReservation=true skips re-reserve:
+      await recordAntigravityTurnEvent({
+        stateDir,
+        agyPid: 6400,
+        agyStartToken: "st-6400",
+        conversationId: convId,
+        idle: true,
+        clearReservation: true,
+      });
+      let parentAlive2 = true;
+      let deadPolled2 = false;
+      let releaseAttempt2 = 0;
+      let reserveAttempt2 = 0;
+      let enteredRetryRelease2 = false;
+      let resolveRetryRelease2: ((val: boolean) => void) | null = null;
+      let opts2: WsClientOptions | null = null;
+      let resolveRun2: (() => void) | null = null;
+      const helper2 = runAntigravityWakeCommand({
+        env: bridgeEnv,
+        configPath: path.join(stateDir, "config.json"),
+        stateDir,
+        source: {
+          [AGY_HELPER_ENV]: JSON.stringify({
+            agyPid: 6400,
+            agyStartToken: "st-6400",
+            attemptId: "att-release-stop",
+            agyExe: "agy",
+          }),
+          ANTIGRAVITY_CONVERSATION_ID: convId,
+          ANTIGRAVITY_CSRF_TOKEN: "csrf-ok",
+          ANTIGRAVITY_LS_ADDRESS: "127.0.0.1:5000",
+        },
+        logger,
+        isPidAlive: () => {
+          if (!parentAlive2) deadPolled2 = true;
+          return parentAlive2;
+        },
+        dialTcp: () => Promise.resolve(true),
+        settleMs: 5,
+        pollMs: 15,
+        wsClientFactory: (opts) => {
+          opts2 = opts;
+          return {
+            run: () =>
+              new Promise<void>((resolve) => {
+                resolveRun2 = resolve;
+              }),
+            close: () => {
+              resolveRun2?.();
+              return Promise.resolve();
+            },
+          };
+        },
+        setReservation: (sd, id, reserved) => {
+          if (reserved) {
+            reserveAttempt2 += 1;
+            return setAntigravityReservation(sd, id, true);
+          }
+          releaseAttempt2 += 1;
+          if (releaseAttempt2 === 1) {
+            return Promise.reject(new Error("release fail 1"));
+          }
+          enteredRetryRelease2 = true;
+          return new Promise<boolean>((resolve) => {
+            resolveRetryRelease2 = resolve;
+          });
+        },
+        sendMessage: () => Promise.resolve(false),
+      });
+      await waitFor(() => opts2 !== null, { message: "release-stop ws ready" });
+      (opts2 as WsClientOptions | null)?.onFrame(makeReviewRequest());
+      await waitFor(() => enteredRetryRelease2, { message: "entered retry release" });
+      parentAlive2 = false;
+      await waitFor(() => deadPolled2, { message: "release-stop liveness triggered" });
+      resolveRetryRelease2?.(true);
+      expect(await helper2).toBe(0);
+      expect(reserveAttempt2).toBe(1);
       expect(unhandledSpy).not.toHaveBeenCalled();
     } finally {
       process.off("unhandledRejection", unhandledSpy);
@@ -1094,7 +1273,7 @@ describe("Antigravity loopback validation, sender, launcher, and helper", () => 
 
     try {
       let parentAlive1 = true;
-      let aliveCalls1 = 0;
+      let enteredReservation1 = false;
       let deadPolled1 = false;
       let wsClosed1 = false;
       let sendCalls1 = 0;
@@ -1118,13 +1297,16 @@ describe("Antigravity loopback validation, sender, launcher, and helper", () => 
         },
         logger,
         isPidAlive: () => {
-          aliveCalls1 += 1;
           if (!parentAlive1) deadPolled1 = true;
           return parentAlive1;
         },
         dialTcp: () => Promise.resolve(true),
         settleMs: 5,
-        pollMs: 50,
+        pollMs: 15,
+        setReservation: (sd, id, reserved) => {
+          enteredReservation1 = true;
+          return setAntigravityReservation(sd, id, reserved);
+        },
         wsClientFactory: (opts) => {
           opts1 = opts;
           return {
@@ -1150,8 +1332,7 @@ describe("Antigravity loopback validation, sender, launcher, and helper", () => 
 
       await waitFor(() => opts1 !== null, { message: "drain-1 ws ready" });
       (opts1 as WsClientOptions | null)?.onFrame(makeReviewRequest());
-      await waitFor(() => aliveCalls1 >= 1, { message: "drain-1 tryDeliver started" });
-      await new Promise((r) => setTimeout(r, 25));
+      await waitFor(() => enteredReservation1, { message: "drain-1 entered setReservation" });
       parentAlive1 = false;
       await waitFor(() => deadPolled1, { message: "drain-1 liveness stop triggered" });
       await new Promise((r) => setTimeout(r, 30));
@@ -1237,6 +1418,8 @@ describe("Antigravity loopback validation, sender, launcher, and helper", () => 
 
       parentAlive2 = false;
       await waitFor(() => deadPolled2, { message: "drain-2 liveness stop triggered" });
+      // Emit late frame after closed=true to verify scheduleAttempt ignores post-stop frames:
+      (opts2 as WsClientOptions | null)?.onFrame(makeReviewRequest());
       await new Promise((r) => setTimeout(r, 30));
       expect(helper2Settled).toBe(false);
       expect(wsClosed2).toBe(false);
@@ -1246,22 +1429,13 @@ describe("Antigravity loopback validation, sender, launcher, and helper", () => 
       expect(wsClosed2).toBe(true);
       expect((await readAntigravityWakeState(stateDir)).outstandingReservation).toBe(true);
 
-      // 3) Stop while reservation fails (closed=true inside catch skips retry):
-      await writeFile(
-        mutexPath,
-        `${JSON.stringify({
-          pid: process.pid,
-          token: "held-3",
-          sessionKey: "antigravity-wake",
-          createdAtMs: Date.now(),
-        })}\n`,
-        "utf8",
-      );
+      // 3) Stop while reservation is pending, then reject (closed=true inside catch skips retry):
       let parentAlive3 = true;
       let deadPolled3 = false;
       let opts3: WsClientOptions | null = null;
       let resolveRun3: (() => void) | null = null;
-      let aliveCalls3 = 0;
+      let enteredReservation3 = false;
+      let rejectReservation3: ((err: Error) => void) | null = null;
       const helper3 = runAntigravityWakeCommand({
         env: bridgeEnv,
         configPath: path.join(stateDir, "config.json"),
@@ -1279,13 +1453,18 @@ describe("Antigravity loopback validation, sender, launcher, and helper", () => 
         },
         logger,
         isPidAlive: () => {
-          aliveCalls3 += 1;
           if (!parentAlive3) deadPolled3 = true;
           return parentAlive3;
         },
         dialTcp: () => Promise.resolve(true),
         settleMs: 5,
-        pollMs: 50,
+        pollMs: 15,
+        setReservation: () => {
+          enteredReservation3 = true;
+          return new Promise<boolean>((_resolve, reject) => {
+            rejectReservation3 = reject;
+          });
+        },
         wsClientFactory: (opts) => {
           opts3 = opts;
           return {
@@ -1302,13 +1481,14 @@ describe("Antigravity loopback validation, sender, launcher, and helper", () => 
       });
       await waitFor(() => opts3 !== null, { message: "drain-3 ws ready" });
       (opts3 as WsClientOptions | null)?.onFrame(makeReviewRequest());
-      await waitFor(() => aliveCalls3 >= 1, { message: "drain-3 tryDeliver started" });
-      await new Promise((r) => setTimeout(r, 25));
+      await waitFor(() => enteredReservation3, { message: "drain-3 entered setReservation" });
       parentAlive3 = false;
       await waitFor(() => deadPolled3, { message: "drain-3 liveness stop triggered" });
-      await writeFile(mutexPath, "corrupt-after-stop", "utf8");
+      rejectReservation3?.(new Error("post-stop reservation boom"));
       expect(await helper3).toBe(0);
-      await rm(mutexPath, { force: true });
+      expect(diagnostics.join("")).toContain(
+        "antigravity wake delivery failed: post-stop reservation boom",
+      );
 
       // 4) Parent exits before tryDeliver checks isPidAlive (covers stop inside tryDeliver):
       let parentAlive4 = true;
