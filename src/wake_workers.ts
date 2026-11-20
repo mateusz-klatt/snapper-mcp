@@ -1236,6 +1236,7 @@ async function runAntigravityChildHelper(
   let closed = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let resolveDone: (() => void) | null = null;
+  const inFlight = new Set<Promise<unknown>>();
   const donePromise = new Promise<void>((resolve) => {
     resolveDone = resolve;
   });
@@ -1254,7 +1255,18 @@ async function runAntigravityChildHelper(
     if (closed || timer !== null) return;
     timer = setTimeout(() => {
       timer = null;
-      void tryDeliver();
+      const deliverOp = tryDeliver()
+        .catch((err: unknown) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          options.logger.warn(`antigravity wake delivery failed: ${msg}`);
+          if (!closed) {
+            scheduleAttempt(pollMs);
+          }
+        })
+        .finally(() => {
+          inFlight.delete(deliverOp);
+        });
+      inFlight.add(deliverOp);
     }, delayMs);
   };
 
@@ -1265,30 +1277,42 @@ async function runAntigravityChildHelper(
       return;
     }
     const pref = await readWakePreference(options.stateDir, "antigravity");
+    if (closed) return;
     if (!isWakeEnabled(pref)) {
       stopHelper();
       return;
     }
     const reserved = await setAntigravityReservation(options.stateDir, convId, true);
+    if (closed) return;
     if (!reserved) {
       scheduleAttempt(pollMs);
       return;
     }
-    const ok = await sendMessage({
-      agyExecutable: handshake.agyExe,
-      conversationId: convId,
-      message: SNAPPER_WAKE_PROMPT,
-      env: {
-        ...options.source,
-        ANTIGRAVITY_CONVERSATION_ID: convId,
-        ANTIGRAVITY_LS_ADDRESS: canonicalLs,
-        ANTIGRAVITY_CSRF_TOKEN: csrf,
-      },
-    });
+    let ok = false;
+    let sendErr: unknown = null;
+    let sendThrew = false;
+    try {
+      ok = await sendMessage({
+        agyExecutable: handshake.agyExe,
+        conversationId: convId,
+        message: SNAPPER_WAKE_PROMPT,
+        env: {
+          ...options.source,
+          ANTIGRAVITY_CONVERSATION_ID: convId,
+          ANTIGRAVITY_LS_ADDRESS: canonicalLs,
+          ANTIGRAVITY_CSRF_TOKEN: csrf,
+        },
+      });
+    } catch (err) {
+      sendThrew = true;
+      sendErr = err;
+    }
+    if (closed) return;
     if (ok) {
       pendingWake = false;
     } else {
       await setAntigravityReservation(options.stateDir, convId, false);
+      if (sendThrew) throw sendErr;
       scheduleAttempt(pollMs);
     }
   };
@@ -1314,6 +1338,9 @@ async function runAntigravityChildHelper(
     await donePromise;
   } finally {
     clearInterval(livenessInterval);
+    if (inFlight.size > 0) {
+      await Promise.allSettled([...inFlight]);
+    }
     await stream.close();
   }
   return 0;

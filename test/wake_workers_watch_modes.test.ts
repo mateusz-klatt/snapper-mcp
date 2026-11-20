@@ -977,6 +977,386 @@ describe("Antigravity loopback validation, sender, launcher, and helper", () => 
       }),
     ).toBe(1);
   });
+
+  it("logs and retries Antigravity reservation/send rejections after pollMs without unhandledRejection", async () => {
+    const convId = "45454545-4545-4545-8545-454545454545";
+    await writeWakePreference(stateDir, "antigravity", "on", "linux");
+    await recordAntigravityTurnEvent({
+      stateDir,
+      agyPid: 6200,
+      agyStartToken: "st-6200",
+      conversationId: convId,
+      idle: true,
+      clearReservation: true,
+    });
+
+    const runtimeDir = path.join(stateDir, "runtime");
+    const mutexPath = path.join(runtimeDir, "antigravity-wake.mutex");
+    await mkdir(runtimeDir, { recursive: true });
+    await writeFile(mutexPath, "corrupt-mutex", "utf8");
+
+    const diagnostics: string[] = [];
+    setStderrWriterForTests((line) => diagnostics.push(line));
+    const logger = createLogger("test-agy-retry", { SNAPPER_MCP_LOG_LEVEL: "debug" });
+    const unhandledSpy = vi.fn();
+    process.on("unhandledRejection", unhandledSpy);
+
+    try {
+      let parentAlive = true;
+      let sendCalls = 0;
+      const sendTimestamps: number[] = [];
+      const delivered: string[] = [];
+      const { factory, isReady, emit } = createFakeWsFactory();
+      const helperPromise = runAntigravityWakeCommand({
+        env: bridgeEnv,
+        configPath: path.join(stateDir, "config.json"),
+        stateDir,
+        source: {
+          [AGY_HELPER_ENV]: JSON.stringify({
+            agyPid: 6200,
+            agyStartToken: "st-6200",
+            attemptId: "att-retry",
+            agyExe: "agy",
+          }),
+          ANTIGRAVITY_CONVERSATION_ID: convId,
+          ANTIGRAVITY_CSRF_TOKEN: "csrf-ok",
+          ANTIGRAVITY_LS_ADDRESS: "127.0.0.1:5000",
+        },
+        logger,
+        isPidAlive: () => parentAlive,
+        dialTcp: () => Promise.resolve(true),
+        wsClientFactory: factory,
+        settleMs: 5,
+        pollMs: 40,
+        sendMessage: ({ message }) => {
+          sendCalls += 1;
+          sendTimestamps.push(Date.now());
+          if (sendCalls === 1) {
+            return Promise.reject(new Error("send boom"));
+          }
+          delivered.push(message);
+          parentAlive = false;
+          return Promise.resolve(true);
+        },
+      });
+
+      await waitFor(isReady, { message: "Antigravity retry stream ready" });
+      emit(makeReviewRequest());
+      await waitFor(
+        () => diagnostics.join("").includes("antigravity wake delivery failed:"),
+        { message: "reservation rejection warning logged" },
+      );
+      await rm(mutexPath, { force: true });
+
+      expect(await helperPromise).toBe(0);
+      expect(sendCalls).toBe(2);
+      expect(delivered).toEqual([SNAPPER_WAKE_PROMPT]);
+      expect(sendTimestamps[1]! - sendTimestamps[0]!).toBeGreaterThanOrEqual(20);
+      expect(diagnostics.join("")).toContain("antigravity wake delivery failed: send boom");
+      expect(unhandledSpy).not.toHaveBeenCalled();
+    } finally {
+      process.off("unhandledRejection", unhandledSpy);
+    }
+  });
+
+  it("drains in-flight Antigravity reservation and sendMessage attempts before stopping", async () => {
+    const convId = "46464646-4646-4646-8646-464646464646";
+    await writeWakePreference(stateDir, "antigravity", "on", "linux");
+    await recordAntigravityTurnEvent({
+      stateDir,
+      agyPid: 6300,
+      agyStartToken: "st-6300",
+      conversationId: convId,
+      idle: true,
+      clearReservation: true,
+    });
+
+    // 1) Stop while setAntigravityReservation write/lock is in flight:
+    const runtimeDir = path.join(stateDir, "runtime");
+    const mutexPath = path.join(runtimeDir, "antigravity-wake.mutex");
+    await mkdir(runtimeDir, { recursive: true });
+    await writeFile(
+      mutexPath,
+      `${JSON.stringify({
+        pid: process.pid,
+        token: "held-by-test",
+        sessionKey: "antigravity-wake",
+        createdAtMs: Date.now(),
+      })}\n`,
+      "utf8",
+    );
+
+    const logger = createLogger("test-agy-drain", { SNAPPER_MCP_LOG_LEVEL: "debug" });
+    const diagnostics: string[] = [];
+    setStderrWriterForTests((line) => diagnostics.push(line));
+    const unhandledSpy = vi.fn();
+    process.on("unhandledRejection", unhandledSpy);
+
+    try {
+      let parentAlive1 = true;
+      let aliveCalls1 = 0;
+      let deadPolled1 = false;
+      let wsClosed1 = false;
+      let sendCalls1 = 0;
+      let opts1: WsClientOptions | null = null;
+      let resolveRun1: (() => void) | null = null;
+      let helper1Settled = false;
+      const helper1 = runAntigravityWakeCommand({
+        env: bridgeEnv,
+        configPath: path.join(stateDir, "config.json"),
+        stateDir,
+        source: {
+          [AGY_HELPER_ENV]: JSON.stringify({
+            agyPid: 6300,
+            agyStartToken: "st-6300",
+            attemptId: "att-drain-1",
+            agyExe: "agy",
+          }),
+          ANTIGRAVITY_CONVERSATION_ID: convId,
+          ANTIGRAVITY_CSRF_TOKEN: "csrf-ok",
+          ANTIGRAVITY_LS_ADDRESS: "127.0.0.1:5000",
+        },
+        logger,
+        isPidAlive: () => {
+          aliveCalls1 += 1;
+          if (!parentAlive1) deadPolled1 = true;
+          return parentAlive1;
+        },
+        dialTcp: () => Promise.resolve(true),
+        settleMs: 5,
+        pollMs: 50,
+        wsClientFactory: (opts) => {
+          opts1 = opts;
+          return {
+            run: () =>
+              new Promise<void>((resolve) => {
+                resolveRun1 = resolve;
+              }),
+            close: () => {
+              wsClosed1 = true;
+              resolveRun1?.();
+              return Promise.resolve();
+            },
+          };
+        },
+        sendMessage: () => {
+          sendCalls1 += 1;
+          return Promise.resolve(true);
+        },
+      }).then((code) => {
+        helper1Settled = true;
+        return code;
+      });
+
+      await waitFor(() => opts1 !== null, { message: "drain-1 ws ready" });
+      (opts1 as WsClientOptions | null)?.onFrame(makeReviewRequest());
+      await waitFor(() => aliveCalls1 >= 1, { message: "drain-1 tryDeliver started" });
+      await new Promise((r) => setTimeout(r, 25));
+      parentAlive1 = false;
+      await waitFor(() => deadPolled1, { message: "drain-1 liveness stop triggered" });
+      await new Promise((r) => setTimeout(r, 30));
+      expect(helper1Settled).toBe(false);
+      expect(wsClosed1).toBe(false);
+
+      await rm(mutexPath, { force: true });
+      expect(await helper1).toBe(0);
+      expect(wsClosed1).toBe(true);
+      expect(sendCalls1).toBe(0);
+      expect((await readAntigravityWakeState(stateDir)).outstandingReservation).toBe(true);
+
+      // 2) Stop while sendMessage is deferred; verify no post-stop reservation clear write starts:
+      let parentAlive2 = true;
+      let deadPolled2 = false;
+      let wsClosed2 = false;
+      let opts2: WsClientOptions | null = null;
+      let resolveRun2: (() => void) | null = null;
+      let sendStarted = false;
+      let resolveSend: ((ok: boolean) => void) | null = null;
+      let helper2Settled = false;
+
+      await recordAntigravityTurnEvent({
+        stateDir,
+        agyPid: 6300,
+        agyStartToken: "st-6300",
+        conversationId: convId,
+        idle: true,
+        clearReservation: true,
+      });
+
+      const helper2 = runAntigravityWakeCommand({
+        env: bridgeEnv,
+        configPath: path.join(stateDir, "config.json"),
+        stateDir,
+        source: {
+          [AGY_HELPER_ENV]: JSON.stringify({
+            agyPid: 6300,
+            agyStartToken: "st-6300",
+            attemptId: "att-drain-2",
+            agyExe: "agy",
+          }),
+          ANTIGRAVITY_CONVERSATION_ID: convId,
+          ANTIGRAVITY_CSRF_TOKEN: "csrf-ok",
+          ANTIGRAVITY_LS_ADDRESS: "127.0.0.1:5000",
+        },
+        logger,
+        isPidAlive: () => {
+          if (!parentAlive2) deadPolled2 = true;
+          return parentAlive2;
+        },
+        dialTcp: () => Promise.resolve(true),
+        settleMs: 5,
+        pollMs: 15,
+        wsClientFactory: (opts) => {
+          opts2 = opts;
+          return {
+            run: () =>
+              new Promise<void>((resolve) => {
+                resolveRun2 = resolve;
+              }),
+            close: () => {
+              wsClosed2 = true;
+              resolveRun2?.();
+              return Promise.resolve();
+            },
+          };
+        },
+        sendMessage: () => {
+          sendStarted = true;
+          return new Promise<boolean>((resolve) => {
+            resolveSend = resolve;
+          });
+        },
+      }).then((code) => {
+        helper2Settled = true;
+        return code;
+      });
+
+      await waitFor(() => opts2 !== null, { message: "drain-2 ws ready" });
+      (opts2 as WsClientOptions | null)?.onFrame(makeReviewRequest());
+      await waitFor(() => sendStarted, { message: "drain-2 sendMessage started" });
+
+      parentAlive2 = false;
+      await waitFor(() => deadPolled2, { message: "drain-2 liveness stop triggered" });
+      await new Promise((r) => setTimeout(r, 30));
+      expect(helper2Settled).toBe(false);
+      expect(wsClosed2).toBe(false);
+
+      resolveSend?.(false);
+      expect(await helper2).toBe(0);
+      expect(wsClosed2).toBe(true);
+      expect((await readAntigravityWakeState(stateDir)).outstandingReservation).toBe(true);
+
+      // 3) Stop while reservation fails (closed=true inside catch skips retry):
+      await writeFile(
+        mutexPath,
+        `${JSON.stringify({
+          pid: process.pid,
+          token: "held-3",
+          sessionKey: "antigravity-wake",
+          createdAtMs: Date.now(),
+        })}\n`,
+        "utf8",
+      );
+      let parentAlive3 = true;
+      let deadPolled3 = false;
+      let opts3: WsClientOptions | null = null;
+      let resolveRun3: (() => void) | null = null;
+      let aliveCalls3 = 0;
+      const helper3 = runAntigravityWakeCommand({
+        env: bridgeEnv,
+        configPath: path.join(stateDir, "config.json"),
+        stateDir,
+        source: {
+          [AGY_HELPER_ENV]: JSON.stringify({
+            agyPid: 6300,
+            agyStartToken: "st-6300",
+            attemptId: "att-drain-3",
+            agyExe: "agy",
+          }),
+          ANTIGRAVITY_CONVERSATION_ID: convId,
+          ANTIGRAVITY_CSRF_TOKEN: "csrf-ok",
+          ANTIGRAVITY_LS_ADDRESS: "127.0.0.1:5000",
+        },
+        logger,
+        isPidAlive: () => {
+          aliveCalls3 += 1;
+          if (!parentAlive3) deadPolled3 = true;
+          return parentAlive3;
+        },
+        dialTcp: () => Promise.resolve(true),
+        settleMs: 5,
+        pollMs: 50,
+        wsClientFactory: (opts) => {
+          opts3 = opts;
+          return {
+            run: () =>
+              new Promise<void>((resolve) => {
+                resolveRun3 = resolve;
+              }),
+            close: () => {
+              resolveRun3?.();
+              return Promise.resolve();
+            },
+          };
+        },
+      });
+      await waitFor(() => opts3 !== null, { message: "drain-3 ws ready" });
+      (opts3 as WsClientOptions | null)?.onFrame(makeReviewRequest());
+      await waitFor(() => aliveCalls3 >= 1, { message: "drain-3 tryDeliver started" });
+      await new Promise((r) => setTimeout(r, 25));
+      parentAlive3 = false;
+      await waitFor(() => deadPolled3, { message: "drain-3 liveness stop triggered" });
+      await writeFile(mutexPath, "corrupt-after-stop", "utf8");
+      expect(await helper3).toBe(0);
+      await rm(mutexPath, { force: true });
+
+      // 4) Parent exits before tryDeliver checks isPidAlive (covers stop inside tryDeliver):
+      let parentAlive4 = true;
+      let opts4: WsClientOptions | null = null;
+      let resolveRun4: (() => void) | null = null;
+      const helper4 = runAntigravityWakeCommand({
+        env: bridgeEnv,
+        configPath: path.join(stateDir, "config.json"),
+        stateDir,
+        source: {
+          [AGY_HELPER_ENV]: JSON.stringify({
+            agyPid: 6300,
+            agyStartToken: "st-6300",
+            attemptId: "att-drain-4",
+            agyExe: "agy",
+          }),
+          ANTIGRAVITY_CONVERSATION_ID: convId,
+          ANTIGRAVITY_CSRF_TOKEN: "csrf-ok",
+          ANTIGRAVITY_LS_ADDRESS: "127.0.0.1:5000",
+        },
+        logger,
+        isPidAlive: () => parentAlive4,
+        dialTcp: () => Promise.resolve(true),
+        settleMs: 5,
+        pollMs: 200,
+        wsClientFactory: (opts) => {
+          opts4 = opts;
+          return {
+            run: () =>
+              new Promise<void>((resolve) => {
+                resolveRun4 = resolve;
+              }),
+            close: () => {
+              resolveRun4?.();
+              return Promise.resolve();
+            },
+          };
+        },
+      });
+      await waitFor(() => opts4 !== null, { message: "drain-4 ws ready" });
+      (opts4 as WsClientOptions | null)?.onFrame(makeReviewRequest());
+      parentAlive4 = false;
+      expect(await helper4).toBe(0);
+      expect(unhandledSpy).not.toHaveBeenCalled();
+    } finally {
+      process.off("unhandledRejection", unhandledSpy);
+    }
+  });
 });
 
 describe("watchMain & extractProxyWakeArgs multi-client modes", () => {
